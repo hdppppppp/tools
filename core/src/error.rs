@@ -79,18 +79,12 @@ impl fmt::Display for CryptoError {
         use crate::obf::{obf, obf_fmt};
 
         match self {
-            Self::UnsupportedVersion { got, supported } => obf_fmt!(
-                f,
-                "协议版本不支持：收到 {}，当前支持 {}",
-                got,
-                supported
-            ),
-            Self::Truncated { need, got } => obf_fmt!(
-                f,
-                "消息长度非法：至少需要 {} 字节，实际 {} 字节",
-                need,
-                got
-            ),
+            Self::UnsupportedVersion { got, supported } => {
+                obf_fmt!(f, "协议版本不支持：收到 {}，当前支持 {}", got, supported)
+            }
+            Self::Truncated { need, got } => {
+                obf_fmt!(f, "消息长度非法：至少需要 {} 字节，实际 {} 字节", need, got)
+            }
             Self::HandshakeAuthFailed => f.write_str(&obf!("握手认证失败")),
             Self::TimestampOutOfWindow { skew_ms, limit_ms } => obf_fmt!(
                 f,
@@ -103,9 +97,7 @@ impl fmt::Display for CryptoError {
             }
             Self::SessionNotReady => f.write_str(&obf!("会话尚未建立，请先完成握手")),
             Self::SessionExpired => f.write_str(&obf!("会话已过期")),
-            Self::SequenceExhausted => {
-                f.write_str(&obf!("会话序号空间耗尽，必须重新握手"))
-            }
+            Self::SequenceExhausted => f.write_str(&obf!("会话序号空间耗尽，必须重新握手")),
             Self::InvalidKeyLength { expected, got } => obf_fmt!(
                 f,
                 "密钥材料长度非法：期望 {} 字节，实际 {} 字节",

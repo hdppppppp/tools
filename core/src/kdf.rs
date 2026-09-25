@@ -80,8 +80,8 @@ pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; KEY_LEN] {
 
 /// HKDF-Expand：从 PRK 派生出 32 字节的子密钥。
 pub fn hkdf_expand(prk: &[u8; KEY_LEN], info: &[u8]) -> [u8; KEY_LEN] {
-    let hkdf = Hkdf::<Sha256>::from_prk(prk)
-        .expect(&obf!("32 字节 PRK 一定满足 HKDF 的最小长度要求"));
+    let hkdf =
+        Hkdf::<Sha256>::from_prk(prk).expect(&obf!("32 字节 PRK 一定满足 HKDF 的最小长度要求"));
     let mut out = [0u8; KEY_LEN];
     hkdf.expand(info, &mut out)
         .expect(&obf!("请求 32 字节输出远小于 HKDF-SHA256 的 255×32 上限"));
