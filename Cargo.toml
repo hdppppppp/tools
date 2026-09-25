@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "jni",
+    "node",
+    "wasm",
+]
+
+# 版本号刻意与客户端 / 服务端发布版本解耦：加密层有独立的协议版本（PROTOCOL_VERSION），
+# 它一旦变化就意味着线上要同时升级服务端和客户端，不能跟着 App 的版本号一起漂。
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+# 纯 Rust 实现的密码学组件，没有 C 依赖 —— 这是能同时交叉编译到
+# aarch64-linux-android / wasm32-unknown-unknown / x86_64-pc-windows-msvc 的前提。
+# 换成 ring 或 openssl 就会卡在 wasm 和 NDK 的链接上。
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+hkdf = { version = "0.12", default-features = false }
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+subtle = { version = "2", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
+getrandom = "0.2"
+thiserror = "2"
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+taotao-crypto-core = { path = "core" }
+
+# ---- release 产物体积与逆向成本 ----
+# 四个目标都要吃这套配置：.so/.dll/.node/.wasm 都会被塞进安装包或静态站点，
+# 体积直接换算成用户下载量；同时 strip + lto 让提取密钥和还原控制流的成本上升。
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+incremental = false
+overflow-checks = false
+debug = false
+
+# `strip = "symbols"` 而不是 "debuginfo"：动态符号表（.dynsym）里被标记为导出的
+# 符号不会被剥掉，否则 cdylib 根本没法被 dlopen / System.loadLibrary 加载 ——
+# 也就是说 JNI 的 `Java_com_taotao_music_crypto_NativeCrypto_*` 和 napi 的
+# `napi_register_module_v1` 都会安然保留。这里剥掉的是静态符号表，它才是
+# 逆向时用来还原函数名和调用关系的那份数据。
+strip = "symbols"
+
+# ⚠️ 这里**不能**设 `panic = "abort"`。
+#
+# 直觉上 abort 能让体积小几十 KB，但 JNI 和 napi 两个绑定层都依赖
+# `catch_unwind` 把 Rust panic 转成宿主语言异常。abort 下 panic 直接杀进程，
+# catch_unwind 完全失效 —— 一次数组越界就会让整个 App 闪退，且没有任何
+# Java/JS 栈信息，线上只能看到「应用崩溃」四个字。
+#
+# 体积上的代价是 unwind 表（安卓 arm64 上约 40KB），用 `lto = "fat"` 和
+# `opt-level = "z"` 已经吃掉了一部分。这点体积换可诊断性，值得。
+# （wasm32-unknown-unknown 本身不支持 unwind，Rust 会强制按 abort 编译，
+#   但 wasm 侧本来就没有 catch_unwind 的语义，不受这条影响。）
+panic = "unwind"
+
+# 调试用的 profile：需要看 Rust 侧栈回溯时用 `--profile dev` 构建。
+[profile.dev]
+opt-level = 0
+debug = true

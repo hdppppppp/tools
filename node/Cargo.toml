@@ -1,0 +1,22 @@
+[package]
+name = "taotao-crypto-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "桃桃音乐加密层的 Node 原生扩展（.node），供 NestJS 后端使用"
+
+# cdylib + napi-rs：编译出动态库后重命名为 .node 才能被 Node 的
+# process.dlopen 加载。这是 Node 原生扩展的固定约定，不是可选项。
+[lib]
+crate-type = ["cdylib"]
+name = "taotao_crypto_node"
+
+[dependencies]
+taotao-crypto-core.workspace = true
+napi = { version = "2", default-features = false, features = ["napi4"] }
+napi-derive = "2"
+
+[build-dependencies]
+napi-build = "2"

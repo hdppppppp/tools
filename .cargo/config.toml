@@ -1,0 +1,33 @@
+# Android 交叉编译的链接器配置。
+#
+# Rust 交叉编译到 Android 时不会自己找到 NDK 的 clang —— 必须显式指定。
+# 这里假设 NDK 的 `toolchains/llvm/prebuilt/<host>/bin` 已经在 PATH 里。
+# 两条路径都会加：CI 里由 .github/workflows/build.yml 加，
+# 本地由 tools/build.ps1 的 Build-Android 加。
+#
+# API level 取 24：与 androidApp/build.gradle.kts 的 minSdk 保持一致。
+# 不一致的后果是链接期报 `undefined reference to __android_log_...` 之类的
+# 符号缺失，或者更糟 —— 链接成功但运行到新 API 上直接崩。
+
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android24-clang"
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.armv7-linux-androideabi]
+linker = "armv7a-linux-androideabi24-clang"
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android24-clang"
+
+[target.i686-linux-android]
+linker = "i686-linux-android24-clang"
+
+# 16KB 页面对齐（`-z max-page-size=16384`）是 Google Play 从 2025 年 11 月起
+# 对 targetSdk 35+ 的硬性要求。不加这条，上架会被拒；而且报错信息是
+# 「你的 APK 未按 16KB 页面大小对齐」，不会告诉你是哪个 .so 的问题。
+# x86_64 / i686 只在模拟器和少数设备上用，不强制。
+
+[target.wasm32-unknown-unknown]
+# wasm 不需要链接器，但需要开这个优化才能让 wasm-bindgen 正确导出。
+rustflags = ["-C", "target-feature=+mutable-globals"]

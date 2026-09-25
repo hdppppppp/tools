@@ -1,0 +1,25 @@
+[package]
+name = "taotao-crypto-jni"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "桃桃音乐加密层的 JNI 绑定：同时产出 Android .so 与 Windows .dll"
+
+# cdylib 是唯一正确的 crate 类型：JNI 靠动态库符号解析找到
+# `Java_com_taotao_music_crypto_NativeCrypto_*`，静态库没法被 System.loadLibrary 加载。
+[lib]
+crate-type = ["cdylib"]
+# 产物名带 _jni 后缀：同一 workspace 里 node 和 wasm 也产出 cdylib，
+# 名字相同会在 target/release/deps 下撞名，链接期报
+# `LNK1104: cannot open file ...taotao_crypto.dll`。
+# 最终交付名由构建脚本在拷贝时改成 libtaotao_crypto.so / taotao_crypto.dll。
+name = "taotao_crypto_jni"
+
+[dependencies]
+taotao-crypto-core.workspace = true
+# 纯 Rust 的 JNI 绑定，不需要 JDK 头文件，也不需要 javac —— 交叉编译到
+# aarch64-linux-android 时这是唯一省心的选择（用 bindgen 生成头文件绑定会
+# 需要完整 NDK sysroot 里的 jni.h）。
+jni = "0.22"

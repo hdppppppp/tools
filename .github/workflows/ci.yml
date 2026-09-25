@@ -1,0 +1,29 @@
+name: CI
+
+# 日常流水线：push 到 main、任何 PR、以及手动触发。
+#
+# 这里**故意不传 TAOTAO_CRYPTO_PSK**，所以产物一律用占位密钥构建，
+# hasRealPsk() 返回 false。这样的产物可以放心公开下载（PR 的 artifact
+# 对所有能看到仓库的人是可见的），用于前端联调和协议对齐。
+#
+# 真实密钥只在打 tag 时由 release.yml 从 Secrets 注入。
+# 详见 README 的「PSK 策略」一节。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上的旧运行会被新的取消，省 CI 配额。
+# 但 tag 构建不在这个文件里，不会被误取消。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      artifact-suffix: dev
+      require-real-psk: false

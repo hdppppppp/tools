@@ -1,0 +1,25 @@
+[package]
+name = "taotao-crypto-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "桃桃音乐加密层的 WebAssembly 绑定，供 Web 分享播放器使用"
+
+[lib]
+# cdylib 是 wasm-bindgen 的固定要求：它需要动态库产物才能做
+# 胶水代码生成和 wasm-opt 后处理。
+crate-type = ["cdylib", "rlib"]
+name = "taotao_crypto_wasm"
+
+[dependencies]
+taotao-crypto-core.workspace = true
+wasm-bindgen = "0.2"
+
+# wasm32-unknown-unknown 上没有操作系统，`getrandom` 必须改走浏览器的
+# `crypto.getRandomValues`。这个 feature 只能由**依赖图里的某一方**开启，
+# 所以它必须写在这里而不是 core 里 —— core 还要给安卓和 Windows 用，
+# 在那边开 `js` feature 会直接编译失败。
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

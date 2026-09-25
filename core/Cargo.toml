@@ -1,0 +1,34 @@
+[package]
+name = "taotao-crypto-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "桃桃音乐传输层加密协议核心：X25519 握手 + ChaCha20-Poly1305 帧加密 + 防重放"
+
+# 依赖一律 default-features = false：core 要被 wasm32-unknown-unknown 消费，
+# 任何默认开启的 std 依赖都会在 wasm 目标上编译失败。
+[dependencies]
+chacha20poly1305.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+# 仅测试用：协议向量测试需要固定随机源，避免用例依赖真随机而无法复现。
+hex-literal = "0.4"
+
+[build-dependencies]
+# build.rs 要解析 TAOTAO_CRYPTO_PSK 的十六进制。
+#
+# 注意它必须**同时**出现在 [dependencies] 和 [build-dependencies] 里：
+# 构建脚本是一个独立编译的 crate，拿不到普通依赖。
+# 少了这一行会报 `cannot find module or crate 'hex'`，指向的是 build.rs。
+hex = "0.4"

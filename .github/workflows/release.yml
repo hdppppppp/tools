@@ -1,0 +1,142 @@
+name: 发布
+
+# 生产产物流水线。只在打 tag 时执行。
+#
+# 与 ci.yml 的唯一区别：require-real-psk: true + 从 Secrets 注入真 PSK。
+# 两道保险同时生效：
+#   ① psk-guard 检查 secret 非空且形状正确，否则直接失败；
+#   ② node job 的冒烟测试带 --expect-real-psk，会实际加载产物断言
+#      hasRealPsk() === true。
+# 任一环节漏掉，Release 都不会产出 —— 而不是安静地发一份没有密钥的包。
+
+on:
+  push:
+    tags: ['v*']
+  # 手动触发用于验证 Secrets 是否配好、构建是否通，不会创建 Release。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 版本一致性：tag 必须与 Cargo.toml 的 [workspace.package] version 相同
+  #
+  # 不一致时 Release 里的包名与实际版本对不上，下游（主项目、服务端镜像）
+  # 无法判断该取哪一份。手动触发时没有 tag，这一步自动跳过。
+  #
+  # 注意 `if` 写在 step 上而不是 job 上：写在 job 上时，手动触发会因为
+  # 这个 job 被 skip 而连带 skip 掉依赖它的 build —— 那就什么也构建不出来了。
+  # ---------------------------------------------------------------------------
+  version-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_section = 1; next }
+            /^\[/ { in_section = 0 }
+            in_section && /^version[[:space:]]*=/ {
+              gsub(/["[:space:]]/, "", $0)
+              split($0, parts, "=")
+              print parts[2]
+              exit
+            }
+          ' Cargo.toml)
+          if [ -z "$VERSION" ]; then
+            echo "::error::无法从 Cargo.toml 的 [workspace.package] 解析出 version"
+            exit 1
+          fi
+          echo "tag：$GITHUB_REF_NAME（去掉 v 前缀为 $TAG）"
+          echo "Cargo.toml 版本：$VERSION"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag（$TAG）与 Cargo.toml 的 version（$VERSION）不一致。"
+            echo "::error::先改 Cargo.toml 的 [workspace.package] version 并提交，再打 tag。"
+            exit 1
+          fi
+          echo "版本一致"
+
+  build:
+    needs: version-guard
+    uses: ./.github/workflows/build.yml
+    with:
+      artifact-suffix: prod
+      require-real-psk: true
+    secrets:
+      TAOTAO_CRYPTO_PSK: ${{ secrets.TAOTAO_CRYPTO_PSK }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # 手动触发时 github.ref 不是 tag，跳过发布只留 artifact。
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for d in artifacts/*/; do
+            name=$(basename "$d")
+            # 产物名形如 android-prod，交付名去掉 -prod 后缀。
+            clean=${name%-prod}
+            (cd "$d" && zip -qr "$GITHUB_WORKSPACE/dist/$clean.zip" .)
+          done
+          echo "--- 打包结果 ---"
+          ls -l dist
+
+      - name: 校验每个包里都有东西
+        # zip 对空目录会安静地生成一个只有目录项的包。
+        # 这里显式检查每个包至少含一个非空文件。
+        run: |
+          set -euo pipefail
+          fail=0
+          for z in dist/*.zip; do
+            count=$(unzip -l "$z" | awk 'NR > 3 && $1 != 0 && $4 != "" { n++ } END { print n+0 }')
+            echo "$z 含 $count 个非空条目"
+            if [ "$count" -eq 0 ]; then
+              echo "::error::$z 是空包"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: 生成校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: true
+          body: |
+            四平台加密层产物。
+
+            | 包 | 内容 |
+            | --- | --- |
+            | `android.zip` | `arm64-v8a/libtaotao_crypto.so`、`x86_64/libtaotao_crypto.so` |
+            | `windows.zip` | `taotao_crypto.dll` |
+            | `node-linux-x64.zip` | `taotao_crypto.node`（Linux x64，给后端容器） |
+            | `node-windows-x64.zip` | `taotao_crypto.node`（Windows x64） |
+            | `wasm.zip` | `taotao_crypto_bg.wasm`、`taotao_crypto.js`、`taotao_crypto.d.ts` |
+
+            产物内已注入真实 PSK，**不要公开分发**。
+
+            ⚠️ `taotao_crypto.js` 与 `taotao_crypto_bg.wasm` 必须同批部署，
+            混用不同构建批次的 JS 与 wasm 会炸 `LinkError`。
+
+            校验下载完整性：`sha256sum -c SHA256SUMS.txt`

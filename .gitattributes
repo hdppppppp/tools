@@ -1,0 +1,38 @@
+# 行尾统一由这里决定，不依赖各人本机的 core.autocrlf 设置。
+#
+# 为什么必须显式写：这个仓库的源码要在 Linux CI 上编译、在 Windows 上开发。
+# 靠 core.autocrlf 的话，同一份文件在不同机器上会得到不同的行尾，
+# 表现是「我本地没问题，CI 上炸了」或者无意义的整文件 diff。
+
+# 默认：检出为 LF。仓库内统一存 LF。
+* text=auto eol=lf
+
+# 明确声明为文本的文件（避免 Git 误判二进制）
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.lock  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.cjs   text eol=lf
+*.js    text eol=lf
+*.ts    text eol=lf
+*.kt    text eol=lf
+*.txt   text eol=lf
+
+# Windows 脚本保持 CRLF：Windows PowerShell 5.1 对 LF 行尾的 .ps1
+# 处理不如 pwsh 7 稳妥，而这个仓库的脚本要在两种环境里都能跑。
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制产物：Git 不要碰，也不要在 diff 里显示
+*.node  binary
+*.so    binary
+*.dll   binary
+*.wasm  binary
+*.a     binary
+*.lib   binary
+*.jks   binary
+*.zip   binary
