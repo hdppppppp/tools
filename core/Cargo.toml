@@ -18,8 +18,21 @@ sha2.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
 getrandom.workspace = true
-thiserror.workspace = true
 hex.workspace = true
+
+# 编译期字符串混淆。**可选**：客户端产物（.so/.dll/.wasm）由各自的 crate 开启
+# `obfuscate` feature，服务端 .node 不开启（它不对外分发，混淆只会白付开销）。
+#
+# 它是 proc-macro，只在宿主机上跑，不会进目标平台的依赖图 —— 这一点很关键，
+# core 要被 wasm32-unknown-unknown 消费，任何带 std 默认特性的普通依赖都会
+# 在那边编译失败。
+cryptify = { version = "3.2", optional = true }
+
+[features]
+# 开启后 core 里的协议标签与错误文案不再以明文出现在二进制里。
+# 密钥经 CRYPTIFY_KEY 环境变量注入，缺省用 cryptify 内置的固定密钥 ——
+# 两种都保持可复现构建，见 src/obf.rs 的模块文档。
+obfuscate = ["dep:cryptify"]
 
 [dev-dependencies]
 # 仅测试用：协议向量测试需要固定随机源，避免用例依赖真随机而无法复现。

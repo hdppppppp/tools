@@ -19,6 +19,7 @@ use zeroize::Zeroize;
 
 use crate::error::{CryptoError, Result};
 use crate::kdf::PSK_LEN;
+use crate::obf::{obf, obf_string};
 use crate::protocol::MAX_PSK_ID_LEN;
 
 /// 一条带标识的预共享密钥。
@@ -37,18 +38,19 @@ impl Psk {
     pub fn new(id: impl Into<String>, key: [u8; PSK_LEN]) -> Result<Self> {
         let id = id.into();
         if id.is_empty() {
-            return Err(CryptoError::PskNotConfigured("psk_id 不能为空".into()));
+            return Err(CryptoError::PskNotConfigured(obf!("psk_id 不能为空")));
         }
         if id.len() > MAX_PSK_ID_LEN {
-            return Err(CryptoError::PskNotConfigured(format!(
-                "psk_id 长度 {} 超过上限 {MAX_PSK_ID_LEN}",
-                id.len()
+            return Err(CryptoError::PskNotConfigured(obf_string!(
+                "psk_id 长度 {} 超过上限 {}",
+                id.len(),
+                MAX_PSK_ID_LEN
             )));
         }
         if !id.is_ascii() {
             // 非 ASCII 的 id 在不同语言侧的编码处理不一致，会在握手 MAC 上
             // 表现出「只有某些环境失败」这种极难查的问题。
-            return Err(CryptoError::PskNotConfigured("psk_id 必须是 ASCII".into()));
+            return Err(CryptoError::PskNotConfigured(obf!("psk_id 必须是 ASCII")));
         }
         Ok(Self { id, key })
     }
@@ -56,7 +58,7 @@ impl Psk {
     /// 从十六进制字符串构造（64 个 hex 字符）。
     pub fn from_hex(id: impl Into<String>, hex_key: &str) -> Result<Self> {
         let bytes = hex::decode(hex_key.trim())
-            .map_err(|_| CryptoError::PskNotConfigured("PSK 不是合法的十六进制".into()))?;
+            .map_err(|_| CryptoError::PskNotConfigured(obf!("PSK 不是合法的十六进制")))?;
         let key: [u8; PSK_LEN] =
             bytes
                 .as_slice()
@@ -112,9 +114,9 @@ impl core::fmt::Debug for Psk {
 /// 用途：一套主密钥管理多套环境（dev / staging / prod），只要换 `psk_id`
 /// 就能得到互不相通的密钥。避免「测试环境的密钥泄漏导致生产可被解密」。
 pub fn derive_psk_from_seed(seed: &[u8; PSK_LEN], psk_id: &str) -> Result<Psk> {
-    let mut info = b"taotao-crypto-v1/psk/".to_vec();
+    let mut info = obf!("taotao-crypto-v1/psk/").into_bytes();
     info.extend_from_slice(psk_id.as_bytes());
-    let prk = crate::kdf::hkdf_extract(b"taotao-psk-seed", seed);
+    let prk = crate::kdf::hkdf_extract(&obf!("taotao-psk-seed").into_bytes(), seed);
     let key = crate::kdf::hkdf_expand(&prk, &info);
     Psk::new(psk_id, key)
 }

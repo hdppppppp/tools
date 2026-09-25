@@ -10,6 +10,7 @@ use sha2::Sha256;
 use zeroize::Zeroize;
 
 use crate::error::{CryptoError, Result};
+use crate::obf::obf;
 
 /// PSK 固定 32 字节（256 位）。短于 32 字节的密钥在现代硬件上可以爆破。
 pub const PSK_LEN: usize = 32;
@@ -19,14 +20,29 @@ pub const KEY_LEN: usize = 32;
 pub const RANDOM_BLOCK_LEN: usize = 16;
 
 /// 握手专用密钥的 HKDF info 标签。
-const INFO_HANDSHAKE: &[u8] = b"taotao-crypto-v1/handshake";
-/// 客户端→服务端数据密钥的 HKDF info 标签。
-const INFO_KEY_C2S: &[u8] = b"taotao-crypto-v1/key/c2s";
-/// 服务端→客户端数据密钥的 HKDF info 标签。
+///
+/// 返回 `Vec<u8>` 而不是 `const &[u8]`：标签要经 [`crate::obf::obf!`] 混淆，
+/// 而混淆是在**运行期**才把明文解出来的，`const` 里放不下。
+///
+/// 代价是每次调用多一次分配。这些函数只在握手路径上被调用（每个会话一次，
+/// 而会话 TTL 是 30 分钟），不在逐帧热路径上 —— 帧加密走的是派生好的
+/// [`SessionKeys`]，不会经过这里。
+fn info_handshake() -> Vec<u8> {
+    obf!("taotao-crypto-v1/handshake").into_bytes()
+}
+
+/// 客户端→服务端数据密钥的 HKDF info 标签。理由见 [`info_handshake`]。
+fn info_key_c2s() -> Vec<u8> {
+    obf!("taotao-crypto-v1/key/c2s").into_bytes()
+}
+
+/// 服务端→客户端数据密钥的 HKDF info 标签。理由见 [`info_handshake`]。
 ///
 /// 双向必须用**不同**的 info 派生：如果两个方向共用一个密钥，服务端加密的
 /// 响应就能被原样当作客户端请求发回来（反射攻击），而 MAC 是合法的。
-const INFO_KEY_S2C: &[u8] = b"taotao-crypto-v1/key/s2c";
+fn info_key_s2c() -> Vec<u8> {
+    obf!("taotao-crypto-v1/key/s2c").into_bytes()
+}
 
 /// 随机数来源抽象。
 ///
@@ -64,10 +80,11 @@ pub fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> [u8; KEY_LEN] {
 
 /// HKDF-Expand：从 PRK 派生出 32 字节的子密钥。
 pub fn hkdf_expand(prk: &[u8; KEY_LEN], info: &[u8]) -> [u8; KEY_LEN] {
-    let hkdf = Hkdf::<Sha256>::from_prk(prk).expect("32 字节 PRK 一定满足 HKDF 的最小长度要求");
+    let hkdf = Hkdf::<Sha256>::from_prk(prk)
+        .expect(&obf!("32 字节 PRK 一定满足 HKDF 的最小长度要求"));
     let mut out = [0u8; KEY_LEN];
     hkdf.expand(info, &mut out)
-        .expect("请求 32 字节输出远小于 HKDF-SHA256 的 255×32 上限");
+        .expect(&obf!("请求 32 字节输出远小于 HKDF-SHA256 的 255×32 上限"));
     out
 }
 
@@ -76,7 +93,7 @@ pub fn hkdf_expand(prk: &[u8; KEY_LEN], info: &[u8]) -> [u8; KEY_LEN] {
 /// 握手消息里的 MAC 用这条密钥，和数据密钥完全隔离。
 pub fn derive_handshake_key(psk: &[u8; PSK_LEN], psk_id: &[u8]) -> [u8; KEY_LEN] {
     let prk = hkdf_extract(psk_id, psk);
-    hkdf_expand(&prk, INFO_HANDSHAKE)
+    hkdf_expand(&prk, &info_handshake())
 }
 
 /// 从 X25519 共享秘密派生双向会话密钥。
@@ -91,12 +108,14 @@ pub fn derive_session_keys(
 ) -> (SessionKeys, SessionKeys) {
     let prk = hkdf_extract(salt, shared_secret);
 
-    let mut info_c2s = Vec::with_capacity(INFO_KEY_C2S.len() + session_id.len());
-    info_c2s.extend_from_slice(INFO_KEY_C2S);
+    let label_c2s = info_key_c2s();
+    let mut info_c2s = Vec::with_capacity(label_c2s.len() + session_id.len());
+    info_c2s.extend_from_slice(&label_c2s);
     info_c2s.extend_from_slice(session_id);
 
-    let mut info_s2c = Vec::with_capacity(INFO_KEY_S2C.len() + session_id.len());
-    info_s2c.extend_from_slice(INFO_KEY_S2C);
+    let label_s2c = info_key_s2c();
+    let mut info_s2c = Vec::with_capacity(label_s2c.len() + session_id.len());
+    info_s2c.extend_from_slice(&label_s2c);
     info_s2c.extend_from_slice(session_id);
 
     let c2s = SessionKeys {
@@ -148,7 +167,7 @@ impl Drop for SessionKeys {
 /// 计算 HMAC-SHA256。
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
-        .expect("HMAC-SHA256 接受任意长度的密钥，不会失败");
+        .expect(&obf!("HMAC-SHA256 接受任意长度的密钥，不会失败"));
     mac.update(data);
     let tag = mac.finalize().into_bytes();
     let mut out = [0u8; 32];

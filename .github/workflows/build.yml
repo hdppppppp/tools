@@ -28,6 +28,14 @@ on:
     secrets:
       TAOTAO_CRYPTO_PSK:
         required: false
+      # 字符串混淆密钥。**刻意不是必填**：没配时 cryptify 退回内置固定密钥，
+      # 构建照样成功、产物照样可复现。所以它和 PSK 不同 —— 缺了不会让发布
+      # 出问题，只是攻击者少走一步（不用从二进制里挖密钥）。
+      #
+      # 也**不参与** psk-guard 那类「缺失即失败」的检查：把可选的东西做成
+      # 硬失败，会让第一次跑 CI 的人卡在一个和功能无关的配置项上。
+      CRYPTIFY_KEY:
+        required: false
 
 env:
   # NDK 版本显式钉死，不用 runner 预装的「最新版」。两个理由：
@@ -138,6 +146,12 @@ jobs:
     needs: psk-guard
     env:
       TAOTAO_CRYPTO_PSK: ${{ secrets.TAOTAO_CRYPTO_PSK }}
+      # 产物混淆（字符串加密）的密钥，见 core/src/obf.rs。
+      #
+      # 这是**软**依赖：没配时 cryptify 退回它内置的固定密钥，构建照样成功、
+      # 产物照样可复现。配了它的意义是攻击者不能拿「cryptify 的公开默认密钥」
+      # 一把梭解开，必须先真的从二进制里把密钥挖出来 —— 抬高的是这一步成本。
+      CRYPTIFY_KEY: ${{ secrets.CRYPTIFY_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -256,6 +270,15 @@ jobs:
             fi
           done
 
+      - name: 校验字符串混淆生效
+        # 混淆「没生效」是静默失败：构建、测试、上传全都正常，只有真正去
+        # `strings` 的人才会发现产物退回了明文。这一步把它变成构建失败。
+        # 检查范围与不查什么的理由见 tools/check-obfuscated.sh。
+        run: |
+          bash tools/check-obfuscated.sh \
+            out/android/arm64-v8a/libtaotao_crypto.so \
+            out/android/x86_64/libtaotao_crypto.so
+
       - uses: actions/upload-artifact@v4
         with:
           name: android-${{ inputs.artifact-suffix }}
@@ -270,6 +293,8 @@ jobs:
     needs: psk-guard
     env:
       TAOTAO_CRYPTO_PSK: ${{ secrets.TAOTAO_CRYPTO_PSK }}
+      # 产物混淆密钥，同 android job 的说明。
+      CRYPTIFY_KEY: ${{ secrets.CRYPTIFY_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -316,6 +341,12 @@ jobs:
             throw "JNI 导出符号只有 $count 个（预期 20+）。动态符号表可能被 strip 剥掉了，检查 Cargo.toml 的 [profile.release] strip。"
           }
           Write-Host "找到 $count 个 JNI 导出符号"
+
+      - name: 校验字符串混淆生效
+        # windows runner 上自带 Git Bash，直接复用同一份脚本，
+        # 避免和 android job 各写一份逻辑、然后慢慢漂移。
+        shell: bash
+        run: bash tools/check-obfuscated.sh out/windows/taotao_crypto.dll
 
       - uses: actions/upload-artifact@v4
         with:
@@ -390,6 +421,8 @@ jobs:
     needs: psk-guard
     env:
       TAOTAO_CRYPTO_PSK: ${{ secrets.TAOTAO_CRYPTO_PSK }}
+      # 产物混淆密钥，同 android job 的说明。
+      CRYPTIFY_KEY: ${{ secrets.CRYPTIFY_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -529,6 +562,11 @@ jobs:
 
           print("元数据已剥离：没有 name / producers 段")
           PY
+
+      - name: 校验字符串混淆生效
+        # 与上一步互补：上一步管的是 wasm 的**元数据段**，这一步管的是
+        # **字符串字面量**。两者都会「配置对了才生效」，也都不会自己报错。
+        run: bash tools/check-obfuscated.sh out/wasm/taotao_crypto_bg.wasm
 
       - uses: actions/upload-artifact@v4
         with:

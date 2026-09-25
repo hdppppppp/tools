@@ -69,6 +69,9 @@ jobs:
       require-real-psk: true
     secrets:
       TAOTAO_CRYPTO_PSK: ${{ secrets.TAOTAO_CRYPTO_PSK }}
+      # 字符串混淆密钥。没配也能构建（cryptify 会用内置默认密钥），
+      # 所以它不参与 version-guard / psk-guard 那种「缺失即失败」的检查。
+      CRYPTIFY_KEY: ${{ secrets.CRYPTIFY_KEY }}
 
   release:
     needs: build

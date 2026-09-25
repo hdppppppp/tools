@@ -18,7 +18,9 @@ crate-type = ["cdylib"]
 name = "taotao_crypto_jni"
 
 [dependencies]
-taotao-crypto-core.workspace = true
+# 开启 `obfuscate`：jni 产出的是**客户端**产物（Android `.so` 与 Windows `.dll`），
+# 会被塞进安装包分发出去，协议标签与错误文案不该以明文留在二进制里。
+taotao-crypto-core = { workspace = true, features = ["obfuscate"] }
 # 纯 Rust 的 JNI 绑定，不需要 JDK 头文件，也不需要 javac —— 交叉编译到
 # aarch64-linux-android 时这是唯一省心的选择（用 bindgen 生成头文件绑定会
 # 需要完整 NDK sysroot 里的 jni.h）。

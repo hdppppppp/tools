@@ -21,6 +21,12 @@
     64 个十六进制字符的 PSK。不传则读取环境变量 TAOTAO_CRYPTO_PSK；
     两者都没有时用占位密钥构建，并在结尾打醒目警告（产物不可用于生产）。
 
+.PARAMETER ObfuscateKey
+    字符串混淆密钥。不传则读取环境变量 CRYPTIFY_KEY。
+    两者都没有时 cryptify 用它**内置的固定密钥** —— 构建照样成功、产物照样
+    可复现，只是攻击者可以拿公开的默认密钥一把梭解开，不必从二进制里挖。
+    所以这是**软**依赖，缺了不会像 PSK 那样打红色警告。
+
 .PARAMETER OutDir
     产物输出目录，默认是本仓库的 `dist/`。
     要直接输出到主项目目录时用它，例如：
@@ -44,6 +50,8 @@ param(
     [string]$Target = 'all',
 
     [string]$Psk = $env:TAOTAO_CRYPTO_PSK,
+
+    [string]$ObfuscateKey = $env:CRYPTIFY_KEY,
 
     [string]$OutDir
 )
@@ -322,6 +330,16 @@ if ($resolvedPsk) {
     Write-Ok "已注入 PSK（指纹：$($resolvedPsk.Substring(0, 8))...）"
 }
 
+# 字符串混淆密钥同理走环境变量，由 cryptify 这个 proc-macro 读取。
+# 只在客户端产物上起作用（.so/.dll/.wasm），服务端 .node 不开 obfuscate。
+if (-not [string]::IsNullOrWhiteSpace($ObfuscateKey)) {
+    $env:CRYPTIFY_KEY = $ObfuscateKey
+    Write-Ok "已注入字符串混淆密钥（长度 $($ObfuscateKey.Length) 字符）"
+}
+else {
+    Write-Warn '未提供 CRYPTIFY_KEY，字符串混淆将使用 cryptify 的内置默认密钥（仍可复现，但更易被解开）'
+}
+
 Push-Location $CryptoRoot
 try {
     if ($Target -in @('all', 'android')) { Build-Android $resolvedPsk }
@@ -331,6 +349,30 @@ try {
 }
 finally {
     Pop-Location
+}
+
+# 客户端产物的字符串混淆属于「配置对了才生效」的那类：feature 没接上时
+# 构建、测试、拷贝全都正常，产物却悄悄退回明文。所以本地也断言一次，
+# 而不是只在 CI 上查 —— 本地迭代恰恰是最容易临时关掉 feature 的场景。
+if ($Target -ne 'node') {
+    $obfTargets = @()
+    foreach ($pattern in @('android\**\*.so', 'windows\*.dll', 'wasm\*.wasm')) {
+        $obfTargets += @(Get-ChildItem -Path (Join-Path $DistRoot $pattern) `
+                -File -ErrorAction SilentlyContinue)
+    }
+    if ($obfTargets.Count -gt 0) {
+        Write-Step '校验字符串混淆'
+        $bash = Get-Command bash -ErrorAction SilentlyContinue
+        if ($bash) {
+            # 交给 shell 的路径必须转成正斜杠：Git Bash 会把反斜杠当转义符。
+            $paths = $obfTargets | ForEach-Object { $_.FullName.Replace('\', '/') }
+            & $bash.Source (Join-Path $PSScriptRoot 'check-obfuscated.sh') @paths
+            if ($LASTEXITCODE -ne 0) { throw '字符串混淆校验未通过' }
+        }
+        else {
+            Write-Warn '未找到 bash，跳过字符串混淆校验（CI 上仍会执行）'
+        }
+    }
 }
 
 Write-Step '完成'

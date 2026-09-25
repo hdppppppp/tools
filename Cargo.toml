@@ -28,14 +28,20 @@ sha2 = { version = "0.10", default-features = false }
 subtle = { version = "2", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
 getrandom = "0.2"
-thiserror = "2"
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+# 字符串混淆用的编译期加密宏（MIT）。只在开启 `obfuscate` feature 的客户端
+# 产物上生效，见 core/src/obf.rs 与 core/Cargo.toml。
+cryptify = "3.2"
 
 taotao-crypto-core = { path = "core" }
 
 # ---- release 产物体积与逆向成本 ----
 # 四个目标都要吃这套配置：.so/.dll/.node/.wasm 都会被塞进安装包或静态站点，
 # 体积直接换算成用户下载量；同时 strip + lto 让提取密钥和还原控制流的成本上升。
+#
+# 字符串层面的混淆**不在这里**，它由 core 的 `obfuscate` feature 控制 ——
+# 客户端的 .so / .dll / .wasm 开，服务端的 .node 不开。见 core/src/obf.rs。
 #
 # ⚠️ `opt-level` 从 `"z"` 改成 `3` 是**实测驱动的**，不要为了省体积改回去。
 #

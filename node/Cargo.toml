@@ -14,6 +14,16 @@ crate-type = ["cdylib"]
 name = "taotao_crypto_node"
 
 [dependencies]
+# ⚠️ 这里**刻意不开启** core 的 `obfuscate` feature。
+#
+# `.node` 是服务端产物，只在服务器上加载，不对外分发 —— 逆向者拿不到它，
+# 混淆它等于白付每次调用的解密开销，还会让服务端排查问题时的错误文案变得
+# 不可读。客户端的三个产物（`.so` / `.dll` / `.wasm`）才需要混淆，
+# 见 jni/Cargo.toml 与 wasm/Cargo.toml。
+#
+# 因此**同一份 core 源码在两种 feature 下都要能编译**。这不是可选项：
+# `obf` 模块在关闭时把字面量退化为 `String`，两种模式的返回类型必须一致，
+# 否则调用点的类型会随 feature 漂移。理由见 core/src/obf.rs 的模块文档。
 taotao-crypto-core.workspace = true
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"

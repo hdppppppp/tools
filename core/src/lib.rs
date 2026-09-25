@@ -66,6 +66,7 @@ pub mod error;
 pub mod frame;
 pub mod handshake;
 pub mod kdf;
+pub mod obf;
 pub mod protocol;
 pub mod psk;
 pub mod psk_blob;
