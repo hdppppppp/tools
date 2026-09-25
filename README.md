@@ -33,16 +33,30 @@
 #   https://github.com/hdppppppp/tools/releases/download/dev-latest/android.zip
 
 gh release download dev-latest --repo hdppppppp/tools --pattern '*.zip'
-unzip -o '*.zip' -d dist/
+# 逐个解到各自平台目录 —— 不要 `unzip '*.zip' -d dist/` 一把梭：
+# node 的两个平台都会产出 taotao_crypto.node，混在一个目录里必然互相覆盖，
+# 而且拿错时的报错是「invalid ELF header」这种跟代码毫无关系的字样。
+for p in android windows node-linux-x64 node-windows-x64 wasm; do
+  unzip -o "$p.zip" -d "dist/$p"
+done
 ```
 
-主项目一行拉取（默认就取 `dev-latest`）：
+主项目一行拉取（脚本在**主项目**里，默认就取 `dev-latest`，自带 SHA256 校验）：
 
 ```powershell
+# PowerShell 7 及以上
 pwsh tools/fetch-crypto.ps1                     # 全部四平台
 pwsh tools/fetch-crypto.ps1 -Only wasm,node-linux-x64
 pwsh tools/fetch-crypto.ps1 -Version v0.1.0     # 生产版本（需 -Token）
 ```
+
+> 本机若只有 Windows PowerShell 5.1（`pwsh` 未安装），脚本同样能跑 ——
+> 它内部按版本做了兼容（TLS 1.2、`-UseBasicParsing` 只在 5.1 上传）。
+> 在 PowerShell 里执行即可：
+>
+> ```powershell
+> & .\tools\fetch-crypto.ps1
+> ```
 
 > ⚠️ **不要从 Actions Artifacts 里拿产物。** 那些需要登录 GitHub 才能下载，
 > 且藏在 run 页面最底部、90 天过期。Artifacts 只是构建过程中的中间产物，
@@ -125,6 +139,9 @@ pwsh tools/build.ps1 -Target android    # 需要 Android NDK
 pwsh tools/build.ps1 -Target wasm       # 需要 wasm-bindgen-cli（版本必须与 Cargo.lock 一致）
 pwsh tools/build.ps1 -Target all -OutDir ..\music\crypto\dist   # 直接输出到主项目
 ```
+
+> 没有 `pwsh`（只有 Windows PowerShell 5.1）时，把 `pwsh` 换成 `&` 即可：
+> `& .\tools\build.ps1 -Target all`。
 
 本地没有 NDK 时 `-Target android` 会给出安装提示后跳过，不会让整条命令失败。
 
