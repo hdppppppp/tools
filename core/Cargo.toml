@@ -32,3 +32,9 @@ hex-literal = "0.4"
 # 构建脚本是一个独立编译的 crate，拿不到普通依赖。
 # 少了这一行会报 `cannot find module or crate 'hex'`，指向的是 build.rs。
 hex = "0.4"
+
+# 性能与分配基准。手写 main 而不是用 criterion：本项目不引入仅测试用的重型依赖，
+# 而这里只需要均值，不需要统计显著性。跑法 `cargo bench -p taotao-crypto-core`。
+[[bench]]
+name = "crypto_bench"
+harness = false

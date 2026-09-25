@@ -132,34 +132,63 @@ pub fn seal_frame(
     header[1..9].copy_from_slice(&seq.to_be_bytes());
     header[9..17].copy_from_slice(&ts_ms.to_be_bytes());
 
-    let aad = build_aad(session_id, aad_context, &header);
-    let ciphertext = aead::seal(key, &nonce, &aad, plaintext)?;
-
-    let mut out = Vec::with_capacity(FRAME_HEADER_LEN + AEAD_NONCE_LEN + ciphertext.len());
+    // 整帧就是「帧头 ‖ nonce ‖ 密文 ‖ 标签」，所以直接把明文写进它的**最终
+    // 位置**再原地加密 —— 一次分配、一次拷贝。
+    //
+    // 原来的写法是「先 `aead::seal` 加密出一份密文，再拷进新缓冲区」，等于每帧
+    // 白付一次全量拷贝和一次分配；64 KB 的响应体上这一项就占了总耗时的一半。
+    let body_offset = FRAME_HEADER_LEN + AEAD_NONCE_LEN;
+    let mut out = Vec::with_capacity(body_offset + plaintext.len() + aead::TAG_LEN);
     out.extend_from_slice(&header);
     out.extend_from_slice(&nonce);
-    out.extend_from_slice(&ciphertext);
+    out.extend_from_slice(plaintext);
+
+    let tag = with_aad(session_id, aad_context, &header, |aad| {
+        aead::seal_in_place(key, &nonce, aad, &mut out[body_offset..])
+    })?;
+    out.extend_from_slice(&tag);
     Ok(out)
 }
 
-/// 构造帧的 AAD。
+/// AAD 的栈上内联容量。
 ///
-/// 三段拼接：会话 ID + 调用方上下文 + 帧头。
+/// AAD = `session_id(16) ‖ aad_context ‖ header(17)`，其中 `aad_context` 是
+/// `"{METHOD} {PATH}?{QUERY}"`。正常请求的上下文在 100 字节以内，这里给它留
+/// 256 字节（合计 289）。更长的查询串会退回堆分配 —— 只是慢一点，不影响正确性。
+const AAD_INLINE_CAP: usize = 16 + 256 + FRAME_HEADER_LEN;
+
+/// 拼出 AAD 并交给 `f` 使用，热路径上不分配。
+///
+/// 拼接本身躲不掉：ChaCha20-Poly1305 只接受一段连续的 AAD，没法分三次喂进去。
+/// 但拼接的**目标**不必在堆上 —— 绝大多数请求都塞得进这个栈缓冲。
+///
+/// 三段的内容与顺序是有安全含义的（见下面 `build_aad` 的原始说明），改动这里
+/// 等于改协议：
 /// - **会话 ID** 是纵深防御。密钥本来就已经按会话隔离了，理论上换个会话 ID
 ///   也解不开；但把它放进 AAD 之后，「帧被搬到另一个会话」会在认证层就失败，
-///   而不是依赖密钥不同这个间接推论。
+///   而不是依赖「密钥不同」这个间接推论。
 /// - **调用方上下文**把帧绑到具体端点（方法 + 路径 + 查询串）。
 /// - **帧头**保护序号和时间戳本身，防止攻击者改序号绕过重放滑窗。
-fn build_aad(
+fn with_aad<R>(
     session_id: &[u8; 16],
     aad_context: &[u8],
     header: &[u8; FRAME_HEADER_LEN],
-) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(16 + aad_context.len() + FRAME_HEADER_LEN);
-    aad.extend_from_slice(session_id);
-    aad.extend_from_slice(aad_context);
-    aad.extend_from_slice(header);
-    aad
+    f: impl FnOnce(&[u8]) -> R,
+) -> R {
+    let total = 16 + aad_context.len() + FRAME_HEADER_LEN;
+    if total <= AAD_INLINE_CAP {
+        let mut buf = [0u8; AAD_INLINE_CAP];
+        buf[..16].copy_from_slice(session_id);
+        buf[16..16 + aad_context.len()].copy_from_slice(aad_context);
+        buf[16 + aad_context.len()..total].copy_from_slice(header);
+        f(&buf[..total])
+    } else {
+        let mut heap = Vec::with_capacity(total);
+        heap.extend_from_slice(session_id);
+        heap.extend_from_slice(aad_context);
+        heap.extend_from_slice(header);
+        f(&heap)
+    }
 }
 
 /// 帧解析结果：序号、时间戳、明文。
@@ -207,16 +236,33 @@ pub fn open_frame(
     let mut nonce = [0u8; AEAD_NONCE_LEN];
     nonce.copy_from_slice(&frame[FRAME_HEADER_LEN..FRAME_HEADER_LEN + AEAD_NONCE_LEN]);
 
-    let ciphertext = &frame[FRAME_HEADER_LEN + AEAD_NONCE_LEN..];
-
     let mut header = [0u8; FRAME_HEADER_LEN];
     header.copy_from_slice(&frame[..FRAME_HEADER_LEN]);
-    let aad = build_aad(session_id, aad_context, &header);
 
-    // 明文的生命周期归调用方 —— 它就是返回值本身。这里不做「拷贝一份再擦掉
-    // 原件」那种操作：被擦掉的是那份没人再看的副本，真正交出去的拷贝仍然
-    // 留在内存里，除了白白多一次全量拷贝之外什么也没保护到。
-    let plaintext = aead::open(key, &nonce, &aad, ciphertext)?;
+    // 把「密文 ‖ 标签」拆开。上面已经查过 `FRAME_MIN_LEN`（它含标签长度），
+    // 所以这里的减法不会下溢。
+    let body = &frame[FRAME_HEADER_LEN + AEAD_NONCE_LEN..];
+    let (ciphertext, tag) = body.split_at(body.len() - aead::TAG_LEN);
+    let tag: &[u8; aead::TAG_LEN] = tag.try_into().map_err(|_| CryptoError::Truncated {
+        need: FRAME_MIN_LEN,
+        got: frame.len(),
+    })?;
+
+    // 明文的生命周期归调用方 —— 它就是返回值本身，所以这一次分配躲不掉
+    // （除非调用方愿意把 `frame` 的所有权交进来）。先把密文拷进输出缓冲区，
+    // 再**原地**解密。
+    //
+    // 这里刻意不做「拷贝一份再擦掉原件」那种操作：被擦掉的是那份没人再看的
+    // 副本，真正交出去的拷贝仍然留在内存里，除了白白多一次全量拷贝之外什么
+    // 也没保护到。验签失败时底层不会执行 `apply_keystream`（先验签后解密），
+    // 缓冲区里仍是密文，直接丢弃即可。
+    let mut plaintext = Vec::with_capacity(ciphertext.len());
+    plaintext.extend_from_slice(ciphertext);
+
+    with_aad(session_id, aad_context, &header, |aad| {
+        aead::open_in_place(key, &nonce, aad, &mut plaintext, tag)
+    })?;
+
     Ok(OpenedFrame {
         seq,
         ts_ms,
@@ -240,6 +286,51 @@ mod tests {
         let opened = open_frame(&KEY, &SID, b"POST /a", &frame).unwrap();
         assert_eq!(opened.seq, 1);
         assert_eq!(opened.ts_ms, 1_700_000_000_000);
+        assert_eq!(opened.plaintext, b"payload");
+    }
+
+    #[test]
+    fn inline_and_heap_aad_agree() {
+        let header = [7u8; FRAME_HEADER_LEN];
+        let ctx = b"GET /api/v1/favorites";
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&SID);
+        expected.extend_from_slice(ctx);
+        expected.extend_from_slice(&header);
+        assert_eq!(
+            with_aad(&SID, ctx, &header, |aad| aad.to_vec()),
+            expected,
+            "栈上分支的拼接顺序必须是 会话ID ‖ 上下文 ‖ 帧头"
+        );
+
+        // 超过内联容量的上下文走堆分支，两条路径必须拼出完全一样的字节 ——
+        // 否则「超长 URL 的请求解不开」只会在生产上出现。
+        let long = vec![b'y'; AAD_INLINE_CAP];
+        let mut expected_long = Vec::new();
+        expected_long.extend_from_slice(&SID);
+        expected_long.extend_from_slice(&long);
+        expected_long.extend_from_slice(&header);
+        assert_eq!(
+            with_aad(&SID, &long, &header, |aad| aad.to_vec()),
+            expected_long,
+            "堆分支必须与栈分支拼出相同的 AAD"
+        );
+    }
+
+    #[test]
+    fn oversized_aad_context_roundtrips() {
+        let long = "x".repeat(AAD_INLINE_CAP);
+        let frame = seal_frame(
+            &KEY,
+            &SID,
+            1,
+            1_700_000_000_000,
+            long.as_bytes(),
+            b"payload",
+        )
+        .unwrap();
+        let opened = open_frame(&KEY, &SID, long.as_bytes(), &frame).unwrap();
         assert_eq!(opened.plaintext, b"payload");
     }
 

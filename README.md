@@ -334,7 +334,7 @@ let frame = session.seal(&aad, b"{}", now)?;
 ## 五、测试
 
 ```bash
-cargo test --workspace --lib        # 87 项
+cargo test --workspace --lib        # 98 项
 ```
 
 全部使用确定性随机源，可复现。覆盖：AEAD 往返与篡改拒绝、帧头认证、
@@ -342,7 +342,8 @@ cargo test --workspace --lib        # 87 项
 PSK 分片编解码的已知答案向量、Debug 输出不泄露密钥。
 
 `tools/smoke-test.cjs` 是**端到端冒烟测试**：加载编译产物、跑完整握手、
-双向加解密、重放拒绝、跨端点重放拒绝、错误 PSK 拒绝，共 14 项。
+双向加解密、重放拒绝、跨端点重放拒绝、错误 PSK 拒绝，以及「未知 `psk_id`
+与错误密钥返回同一种失败」，共 15 项。
 
 ```bash
 node tools/smoke-test.cjs dist/node/taotao_crypto.node
@@ -358,7 +359,83 @@ node tools/smoke-test.cjs dist/node/taotao_crypto.node --expect-real-psk
 
 ---
 
-## 六、获取产物
+## 六、性能与资源占用
+
+CPU 时间在移动端直接换算成耗电，所以这一层要看的不是「能不能跑」，而是
+「每次操作花多少」。基准同时量**耗时**和**堆分配次数** —— 后者决定 Android 上的
+GC 压力，而且比耗时更稳定（耗时会被 CPU 频率和后台负载干扰）。
+
+```bash
+cargo bench -p taotao-crypto-core
+```
+
+基准直接吃 `profile.release`，所以量到的就是**交付产物的真实性能**，不是理想值。
+
+单机实测（x86_64 Windows）：
+
+| 场景 | 耗时 | 吞吐 | 堆分配 |
+| --- | ---: | ---: | ---: |
+| 握手（ClientHello + ServerHello） | 205 µs | — | 14 次 |
+| 封装 1 KB | 2.37 µs | 412 MB/s | 1 次 |
+| 解封 1 KB | 2.37 µs | 411 MB/s | 1 次 |
+| 封装 64 KB | 68.5 µs | 913 MB/s | 1 次 |
+| 解封 64 KB | 48.8 µs | 1.28 GB/s | 1 次 |
+| 会话往返 1 KB（含防重放滑窗） | 5.22 µs | — | 2 次 |
+| 取 12 字节随机数（每帧一次） | 84 ns | — | 0 次 |
+
+握手是每 30 分钟才付一次的开销，数据帧才是每个请求都走的真热路径。
+但这 205 µs **不能退化成毫秒级** —— 一旦退化，在低端安卓机上就是一次可感知的卡顿。
+
+### `opt-level` 是这个模块最贵的一个开关
+
+`opt-level = "z"`（优先体积）会让**握手慢 29 倍**（6029 µs → 205 µs），
+而数据帧慢 3～6 倍。也就是说体积优化对**椭圆曲线运算**的伤害远大于对称加密 ——
+X25519 的域运算全靠内联和循环展开，而 ChaCha20/Poly1305 有 SIMD 后端兜底。
+
+代价只有体积：Windows `.dll` 393 KB → 473 KB（+20%），四个目标加起来
++200 KB 量级，摊到安装包上是噪声。所以这里选了 `opt-level = 3`。
+
+完整论证、以及「只给密码学原语开高优化、其余保持 `"z"`」那个被实测否掉的方案，
+都写在 `Cargo.toml` 的 `[profile.release]` 注释里。
+
+> ⚠️ 这个数字**强依赖 profile**。`session.rs` 的模块注释原先写「X25519 大约
+> 50 微秒」—— 那是按满优化写的，而当时的 `opt-level = "z"` 让同一段代码实际
+> 跑了 6029 µs。改 `opt-level` 之前先跑基准，别让注释和现实脱节。
+
+### 每帧只分配一次
+
+| | 改动前 | 现在 |
+| --- | ---: | ---: |
+| `seal_frame` 分配次数 | 3 | **1** |
+| `open_frame` 分配次数 | 2 | **1**（空报文 0） |
+| 会话往返分配次数 | 5 | **2** |
+| 封装 64 KB 的分配字节 | 131 KB | **66 KB** |
+
+两条改动：
+
+- **AAD 在栈缓冲上拼**（`frame.rs` 的 `with_aad`，289 字节内联，更长的上下文
+  才落堆）。AAD 是「会话 ID ‖ 端点上下文 ‖ 帧头」三段拼接，而 ChaCha20-Poly1305
+  只接受一段连续的 AAD —— 拼接躲不掉，但拼接的**目标**不必在堆上。
+- **原地加解密**（`aead::seal_in_place` / `open_in_place`）。封装时直接把明文写进
+  整帧缓冲区的**最终位置**再原地加密，省掉「先加密出一份密文、再拷进新缓冲区」
+  的那次全量拷贝。大报文上这一项就是 1.7 倍（64 KB：117 µs → 68.5 µs）。
+
+> 原地解密依赖一个必须成立的前提：`decrypt_in_place_detached` 是**先验签、
+> 后解密**。验签失败时它根本不会执行 `apply_keystream`，缓冲区里仍是密文，
+> 不会留下未认证的明文。这条依赖写在 `aead.rs` 的注释里，也有测试锁住
+> （`open_in_place_leaves_buffer_untouched_on_failure`）—— 换实现时会被发现。
+
+### 看过但没动的两处
+
+- **每帧一次 `OsRandom`**（取 12 字节 AEAD nonce）。看着是系统调用就以为贵，
+  实测只要 **84 ns**，约占单帧总耗时的 3%。改成「会话内计数器 nonce」能把
+  2^24 的生日界换成严格不重复，但那是在改协议的安全论证，换不来可观测收益。
+- **`aad_context()` 仍返回 `Vec`**。它是每请求一次、且在绑定层跨过 FFI 之后才调，
+  与字符串编解码本身同一量级，不值得为它改公开签名。
+
+---
+
+## 七、获取产物
 
 产物由 CI 构建，本地**不需要** Rust、NDK、wasm-bindgen、MSVC。
 
@@ -458,14 +535,15 @@ pwsh tools/build.ps1 -Target all -OutDir ..\music\crypto\dist   # 直接输出�
 
 ---
 
-## 七、目录
+## 八、目录
 
 ```text
 ├── Cargo.toml            工作区、共享依赖、release 优化配置
 ├── .cargo/config.toml    Android 链接器与 16KB 页面对齐
 ├── .github/workflows/    CI（build.yml 是四平台构建的唯一实现）
 ├── core/                 协议实现（唯一的逻辑来源，无任何绑定依赖）
-│   └── build.rs          构建期把 PSK 编译进产物并做分片混淆
+│   ├── build.rs          构建期把 PSK 编译进产物并做分片混淆
+│   └── benches/          性能与堆分配基准（`cargo bench`）
 ├── jni/                  JNI 绑定 → Android .so + Windows .dll
 ├── node/                 napi-rs 绑定 → .node
 ├── wasm/                 wasm-bindgen 绑定 → .wasm
@@ -481,7 +559,7 @@ pwsh tools/build.ps1 -Target all -OutDir ..\music\crypto\dist   # 直接输出�
 
 ---
 
-## 八、不做什么
+## 九、不做什么
 
 - **不加密音频流和大文件上传。** `/songs/:id/play` 代理的是几百 MB 音频流，
   逐块 AEAD 会让 CPU 占用翻倍而收益极低（音频本身没有秘密，直链才是）；

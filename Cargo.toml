@@ -36,8 +36,30 @@ taotao-crypto-core = { path = "core" }
 # ---- release 产物体积与逆向成本 ----
 # 四个目标都要吃这套配置：.so/.dll/.node/.wasm 都会被塞进安装包或静态站点，
 # 体积直接换算成用户下载量；同时 strip + lto 让提取密钥和还原控制流的成本上升。
+#
+# ⚠️ `opt-level` 从 `"z"` 改成 `3` 是**实测驱动的**，不要为了省体积改回去。
+#
+# 原先是 `opt-level = "z"`（优先体积）。基准测出来它把 X25519 拖慢了 **29 倍**：
+# 完整握手 6029 µs vs 207 µs，而 `session.rs` 的注释一直按「约 50 µs」在写
+# （207 µs ÷ 4 次标量乘 ≈ 50 µs，说明注释本身就是按满优化写的）。
+# 也就是说 release profile 悄悄推翻了代码自己的性能假设，且没有任何报错。
+# 数据帧同样受益：seal 1 KB 7.22 µs → 2.51 µs（2.9×），64 KB 385.7 → 117.3 µs。
+#
+# 代价只有体积：Windows `.dll` 393,216 → 472,576 字节（+20.2%）。
+# 四个目标全加起来也就 +200 KB 量级，摊到一个音乐 App 的安装包上是噪声；
+# 而 CPU 时间在移动端直接换算成耗电，这笔账明显划算。
+#
+# 顺带否掉的方案：`[profile.release.package.*]` 只给 curve25519-dalek /
+# chacha20 / poly1305 / sha2 开 `opt-level = 3`，其余保持 `"z"`。
+# 实测它**握手能拿满**（210 µs）但**数据帧只拿到 1.4×**（seal 1 KB 4.95 µs）——
+# 因为帧路径上 chacha20 会被内联进按 `"z"` 编译的调用方，LTO 阶段又被按
+# 顶层 opt-level 重新优化回去了。数据帧才是每请求都走的真热路径，
+# 所以宁可多花那 20% 体积。
+#
+# 跑法：`cargo bench -p taotao-crypto-core`（基准直接吃这份 profile，
+# 所以量到的就是交付产物的真实性能，不是理想值）。
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 incremental = false
