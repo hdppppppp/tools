@@ -56,15 +56,48 @@ jobs:
         env:
           PSK: ${{ secrets.TAOTAO_CRYPTO_PSK }}
         run: |
-          if [ -z "$PSK" ]; then
-            echo "::error::require-real-psk=true，但仓库没有配置 TAOTAO_CRYPTO_PSK。"
-            echo "::error::继续下去会产出 hasRealPsk()=false 的产物，客户端无法与真实服务端握手。"
-            echo "::error::修复：仓库 Settings → Secrets and variables → Actions → New repository secret。"
+          set -euo pipefail
+
+          # 先打一行**非敏感指纹**，再判分支。
+          #
+          # 为什么指纹必须在分支之前打：一旦某条分支里 exit，后面就没机会打了。
+          # 而「空」和「格式错」恰恰是最需要区分的两种情况 —— 修法完全不同
+          # （前者是配置位置问题，后者是密钥本身问题），只看到「校验失败」
+          # 四个字没法定位。
+          #
+          # 指纹只含长度与字符集类别，**不含密钥值的任何片段**。
+          LEN=${#PSK}
+          if [ "$LEN" -eq 0 ]; then
+            SHAPE="空"
+          elif [[ "$PSK" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            SHAPE="64 个十六进制字符（合格）"
+          elif [[ "$PSK" =~ ^[0-9a-fA-F]+$ ]]; then
+            SHAPE="纯十六进制，但长度是 $LEN（要求 64）"
+          elif [[ "$PSK" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+            SHAPE="疑似 base64 —— 本项目只接受十六进制"
+          else
+            SHAPE="既不是十六进制也不是 base64"
+          fi
+          echo "TAOTAO_CRYPTO_PSK 指纹：长度 $LEN 字符，形态 $SHAPE"
+
+          if [ "$LEN" -eq 0 ]; then
+            echo "::error::require-real-psk=true，但 secrets.TAOTAO_CRYPTO_PSK 求值为空。"
+            echo "::error::接线本身是对的（release.yml 已显式传递该 secret），所以问题在仓库设置侧。"
+            echo "::error::按可能性排序，逐个排除："
+            echo "::error::  1. 配到了 Secrets and variables → Actions 的 Variables 页签。"
+            echo "::error::     代码读的是 secrets.*；Variables 走 vars.* 命名空间，读不到。"
+            echo "::error::  2. 配成了 Environment secret（需要 job 声明 environment: 才取得到）。"
+            echo "::error::  3. 配到了别的仓库。本仓库是 hdppppppp/tools，不是主项目 music。"
+            echo "::error::  4. 名字对不上：大小写敏感、不能有前后空格，必须精确为 TAOTAO_CRYPTO_PSK。"
+            echo "::error::  5. Organization secret 没有授权给这个仓库。"
+            echo "::error::注意 secret 是只写的，改完读不回来 —— 不确定就重新设一遍。"
             exit 1
           fi
-          if ! printf '%s' "$PSK" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+
+          if ! [[ "$PSK" =~ ^[0-9a-fA-F]{64}$ ]]; then
             echo "::error::TAOTAO_CRYPTO_PSK 必须是 64 个十六进制字符（32 字节）。"
-            echo "::error::当前长度：$(printf '%s' "$PSK" | wc -c) 字符。"
+            echo "::error::当前长度 $LEN 字符，形态：$SHAPE"
+            echo "::error::生成一个合格的：openssl rand -hex 32"
             exit 1
           fi
           echo "PSK 形状校验通过（只校验长度与字符集，值本身不打印）。"
