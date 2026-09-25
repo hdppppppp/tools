@@ -21,16 +21,32 @@
 
 ### 取产物
 
-```bash
-# 生产产物（含真实 PSK，注意保管）
-gh release download --repo <用户名>/taotao-crypto --pattern '*.zip'
-unzip -o '*.zip' -d dist/
+两个入口，按用途选：
 
-# 或者不要凭据、只做联调：用最近一次 main 上的 CI 产物
-gh run download --repo <用户名>/taotao-crypto --name wasm-dev --dir dist/wasm
+| 入口 | 密钥 | 是否需要登录 | 何时更新 |
+| --- | --- | --- | --- |
+| **开发构建** `dev-latest` | 占位（`hasRealPsk()=false`） | **不需要** | 每次 push 到 main |
+| **正式版本** `v*` tag | 注入真实 PSK | 需要（draft 状态） | 打 tag 后由 release.yml 产出 |
+
+```bash
+# 开发构建：免登录直链，浏览器直接打开也能下
+#   https://github.com/hdppppppp/tools/releases/download/dev-latest/android.zip
+
+gh release download dev-latest --repo hdppppppp/tools --pattern '*.zip'
+unzip -o '*.zip' -d dist/
 ```
 
-主项目里可以用 `tools/fetch-crypto.ps1` 一键拉取到 `crypto/dist/`。
+主项目一行拉取（默认就取 `dev-latest`）：
+
+```powershell
+pwsh tools/fetch-crypto.ps1                     # 全部四平台
+pwsh tools/fetch-crypto.ps1 -Only wasm,node-linux-x64
+pwsh tools/fetch-crypto.ps1 -Version v0.1.0     # 生产版本（需 -Token）
+```
+
+> ⚠️ **不要从 Actions Artifacts 里拿产物。** 那些需要登录 GitHub 才能下载，
+> 且藏在 run 页面最底部、90 天过期。Artifacts 只是构建过程中的中间产物，
+> 对外交付统一走 Release —— `ci.yml` 里的 `dev-release` job 就是为此存在的。
 
 ### 改代码后怎么验证
 
@@ -78,8 +94,8 @@ PSK 是构建期写进产物的（`core/build.rs` 读 `TAOTAO_CRYPTO_PSK`）。
 | 文件 | 作用 |
 | --- | --- |
 | `.github/workflows/build.yml` | 可复用工作流，四平台构建的唯一实现 |
-| `.github/workflows/ci.yml` | push / PR / 手动触发，占位密钥 |
-| `.github/workflows/release.yml` | 打 tag 触发，注入真密钥并发布 Release |
+| `.github/workflows/ci.yml` | push / PR / 手动触发，占位密钥；main 上额外产出 `dev-latest` 预发布 |
+| `.github/workflows/release.yml` | 打 tag 触发，注入真密钥并发布正式 Release |
 
 `ci.yml` 与 `release.yml` 的区别**只有**是否注入 PSK —— 构建步骤本身只写一遍。
 拆成两个独立文件维护的典型后果是两边悄悄漂移，而日常 CI 一直是绿的。

@@ -27,3 +27,72 @@ jobs:
     with:
       artifact-suffix: dev
       require-real-psk: false
+
+  # ---------------------------------------------------------------------------
+  # 把 main 上的产物打成预发布 Release，提供一个免登录的固定下载入口。
+  #
+  # 为什么必须有这一步：Actions Artifacts **需要登录 GitHub 才能下载**，
+  # 而且在 run 页面最底部、90 天过期 —— 对「本地不装任何编译环境、直接从
+  # CI 取产物」这个目标来说不够用。Release 的 assets 在公开仓库里是直链，
+  # 浏览器和 curl 都能拿，也正是主项目 tools/fetch-crypto.ps1 期望的形态。
+  #
+  # 复用 build job 已经产出的 artifact，**不重复构建**（不重下 1GB 的 NDK）。
+  #
+  # 产物用占位密钥（与 CI 一致），所以可以放心公开。
+  # 正式版本走 release.yml：tag 触发、注入真密钥、非 prerelease。
+  # ---------------------------------------------------------------------------
+  dev-release:
+    needs: build
+    # 只在 main 的 push 上发；PR 与手动触发跳过（PR 不该产生 Release）。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for d in artifacts/*/; do
+            name=$(basename "$d")
+            # artifact 名形如 android-dev，交付名去掉 -dev 后缀。
+            clean=${name%-dev}
+            (cd "$d" && zip -qr "$GITHUB_WORKSPACE/dist/$clean.zip" .)
+          done
+          ls -l dist
+
+      - name: 生成校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: 开发构建（占位密钥，不可用于生产）
+          prerelease: true
+          make_latest: false
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          body: |
+            `main` 分支最新构建。产物用**占位密钥**构建，`hasRealPsk()` 返回
+            `false` —— 只能用于前端联调与协议对齐，**不能用于生产**。
+
+            | 包 | 内容 |
+            | --- | --- |
+            | `android.zip` | `arm64-v8a/libtaotao_crypto.so`、`x86_64/libtaotao_crypto.so` |
+            | `windows.zip` | `taotao_crypto.dll` |
+            | `node-linux-x64.zip` | `taotao_crypto.node`（给后端容器） |
+            | `node-windows-x64.zip` | `taotao_crypto.node` |
+            | `wasm.zip` | `taotao_crypto_bg.wasm`、`taotao_crypto.js`、`taotao_crypto.d.ts` |
+
+            主项目一行拉取：`pwsh tools/fetch-crypto.ps1`
+
+            生产版本在正式 Release 里，由 `v*` tag 触发并注入真实 PSK。
