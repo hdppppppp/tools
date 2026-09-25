@@ -293,7 +293,14 @@ function Build-Wasm([string]$ResolvedPsk) {
         return
     }
 
-    & wasm-bindgen --target web --out-dir $outDir --out-name taotao_crypto $wasmPath
+    # `--remove-name-section` / `--remove-producers-section`：产物混淆。
+    # wasm-bindgen 输出的模块默认带着 `producers` 段（逐字写着
+    # `processed-by walrus <版本> wasm-bindgen <版本> (<commit>)`）和 `name` 段。
+    # 这两个 flag 只在**输出**上生效，不影响 JS 胶水的导出名。
+    # ⚠️ CI 里有一条断言专门盯着这件事（build.yml「校验元数据已剥离」）——
+    # 本地改动这里时别把它漏掉，否则 CI 会红。
+    & wasm-bindgen --target web --out-dir $outDir --out-name taotao_crypto `
+        --remove-name-section --remove-producers-section $wasmPath
     if ($LASTEXITCODE -ne 0) { throw 'wasm-bindgen 后处理失败' }
 
     $wasmSize = (Get-Item (Join-Path $outDir 'taotao_crypto_bg.wasm')).Length

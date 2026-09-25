@@ -407,8 +407,24 @@ jobs:
         run: cargo build --release --target wasm32-unknown-unknown -p taotao-crypto-wasm
 
       - name: 生成绑定
+        # 两个 `--remove-*-section` 是**产物混淆**，不是可选项。
+        #
+        # wasm-bindgen 会把输入 wasm 交给 walrus 重写一遍，输出的模块里默认留着
+        # 两个自定义段（实测 0.2.128 的产物确实带着）：
+        #
+        #   · `producers` —— 逐字写着 `processed-by walrus 0.26.5
+        #     wasm-bindgen 0.2.128 (246946fdd)`。等于把工具链连同 commit
+        #     一起交给对方，省得他自己猜。
+        #   · `name` —— 函数名表。实测这一份只剩 3 条（walrus 已经把
+        #     Rust 侧的符号名剪掉了），但留着就是留着。
+        #
+        # ⚠️ 这两个 flag 只在**输出**上生效，不影响 wasm-bindgen 生成 JS 胶水
+        # 时对输入 name 段的读取 —— 所以 `taotao_crypto.js` 的导出名照旧。
+        #
+        # 详见 `docs/design.md` 第五节「抗逆向」。
         run: |
           wasm-bindgen --target web --out-dir out/wasm --out-name taotao_crypto \
+            --remove-name-section --remove-producers-section \
             target/wasm32-unknown-unknown/release/taotao_crypto_wasm.wasm
           ls -l out/wasm
 
@@ -428,6 +444,58 @@ jobs:
             exit 1
           fi
           echo "产物完整"
+
+      - name: 校验元数据已剥离
+        # 剥离自定义段属于「配置对了才生效」的那类东西：漏掉时构建全绿、
+        # 产物里却留着工具链指纹，没有任何报错。所以这里断言，而不是相信。
+        #
+        # 断言的是**段表本身**，不是字符串搜索 —— `.wasm` 的 data 段里本来就有
+        # 大量可读文本，按字符串搜会被误伤。
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+
+          path = "out/wasm/taotao_crypto_bg.wasm"
+          data = open(path, "rb").read()
+
+          if data[:4] != b"\0asm" or data[4:8] != b"\x01\0\0\0":
+              sys.exit(f"{path} 不是合法的 wasm 模块")
+
+          def leb(d, i):
+              value = shift = 0
+              while True:
+                  byte = d[i]
+                  i += 1
+                  value |= (byte & 0x7F) << shift
+                  if not byte & 0x80:
+                      return value, i
+                  shift += 7
+
+          customs = []
+          i = 8
+          while i < len(data):
+              section_id = data[i]
+              i += 1
+              size, i = leb(data, i)
+              end = i + size
+              if section_id == 0:  # 自定义段：id 之后先跟段名
+                  length, name_start = leb(data, i)
+                  customs.append(data[name_start:name_start + length].decode("utf-8", "replace"))
+              i = end
+
+          print(f"自定义段：{customs if customs else '（无）'}")
+
+          leaked = [name for name in customs if name in ("name", "producers")]
+          if leaked:
+              print(f"::error::{path} 里仍有未剥离的自定义段：{leaked}")
+              print("::error::`producers` 会写下 walrus / wasm-bindgen 的版本与 commit。")
+              print("::error::检查 wasm-bindgen 是否带了 --remove-name-section "
+                    "--remove-producers-section。")
+              sys.exit(1)
+
+          print("元数据已剥离：没有 name / producers 段")
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
