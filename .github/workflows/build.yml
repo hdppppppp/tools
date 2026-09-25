@@ -116,20 +116,52 @@ jobs:
         with:
           key: android
 
-      - uses: android-actions/setup-android@v3
-
-      - name: 安装 NDK
+      - name: 安装 Android NDK
         # 约 700MB，是这套流水线里最慢的一步。runner 预装的 NDK 版本会随
         # 镜像漂移，所以宁可每次下载也要钉死版本。
+        #
+        # 刻意**不用** android-actions/setup-android：ubuntu runner 本身就预装了
+        # Android SDK 与 cmdline-tools，那个 action 会去重新下载整套 SDK，
+        # 既慢又多一个失败点。这里直接找 runner 自带的 sdkmanager。
         run: |
-          sdkmanager --install "ndk;$NDK_VERSION" > /dev/null
-          NDK_ROOT="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          set -euo pipefail
+
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK" ]; then
+            echo "::error::找不到 Android SDK。ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<未设>} ANDROID_HOME=${ANDROID_HOME:-<未设>}"
+            exit 1
+          fi
+
+          # 不同 runner 镜像对 cmdline-tools 的 PATH 配置不一致，显式找一次。
+          CMDLINE=""
+          for d in "$SDK"/cmdline-tools/*/bin; do
+            if [ -x "$d/sdkmanager" ]; then CMDLINE="$d"; break; fi
+          done
+          if [ -z "$CMDLINE" ]; then
+            echo "::error::在 $SDK/cmdline-tools 下找不到 sdkmanager"
+            ls -R "$SDK/cmdline-tools" 2>/dev/null | head -30 || true
+            exit 1
+          fi
+          echo "使用 sdkmanager：$CMDLINE/sdkmanager"
+
+          # 先接受 license 再安装。两条都忽略退出码 —— sdkmanager 在
+          # 「已经装过」「license 已接受」等情况下的返回码并不一致，
+          # 用「NDK 目录是否真的存在」作为唯一判据更可靠。
+          yes | "$CMDLINE/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$CMDLINE/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null 2>&1 || true
+
+          NDK_ROOT="$SDK/ndk/$NDK_VERSION"
           if [ ! -d "$NDK_ROOT" ]; then
-            echo "::error::NDK 未安装到预期位置：$NDK_ROOT"
-            ls "$ANDROID_SDK_ROOT/ndk" || true
+            echo "::error::NDK $NDK_VERSION 没有装到 $NDK_ROOT"
+            echo "--- $SDK/ndk 下现有内容 ---"
+            ls "$SDK/ndk" 2>/dev/null || echo "(目录不存在)"
+            echo "--- 可用的 NDK 版本（前 10 个）---"
+            "$CMDLINE/sdkmanager" --list 2>/dev/null | grep -E '^[[:space:]]+ndk;' | head -10 || true
             exit 1
           fi
           echo "NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          # 后续步骤（含 build.ps1 的对等逻辑）需要 sdkmanager 在 PATH 里。
+          echo "$CMDLINE" >> "$GITHUB_PATH"
 
       - name: 配置 NDK 工具链
         run: |
