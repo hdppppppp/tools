@@ -121,8 +121,16 @@ jobs:
         # 镜像漂移，所以宁可每次下载也要钉死版本。
         #
         # 刻意**不用** android-actions/setup-android：ubuntu runner 本身就预装了
-        # Android SDK 与 cmdline-tools，那个 action 会去重新下载整套 SDK，
-        # 既慢又多一个失败点。这里直接找 runner 自带的 sdkmanager。
+        # Android SDK 与 cmdline-tools，那个 action 是多余的。
+        #
+        # 首次 CI 里它失败了。根因是它默认要安装一个名为 `tools` 的包：
+        #     Warning: Failed to find package 'tools'
+        # 这个 legacy 包已经从当前的 SDK 仓库移除，所以只要走这个 action
+        # 就必然失败 —— 而它的报错指向 action 内部，看不出是包名问题，
+        # 排查成本很高。直接找 runner 自带的 sdkmanager 就绕开了这一整类问题。
+        #
+        # 注意：也不要给 sdkmanager 传 `cmdline-tools;latest`，同上，
+        # 镜像里已经有了，重复安装只会引入新的失败点。
         run: |
           set -euo pipefail
 
