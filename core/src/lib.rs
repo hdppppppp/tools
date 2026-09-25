@@ -74,7 +74,9 @@ pub mod session;
 pub use engine::{aad, ClientEngine, ServerEngine};
 pub use error::{CryptoError, Result};
 pub use frame::{OpenedFrame, ReplayWindow, SealedFrame};
-pub use handshake::{accept_client_hello, AcceptedHandshake, ClientHandshake, HelloReplayCache};
+pub use handshake::{
+    accept_client_hello, peek_psk_id, AcceptedHandshake, ClientHandshake, HelloReplayCache,
+};
 pub use kdf::{random_array, OsRandom, RandomSource};
 pub use psk::{derive_psk_from_seed, Psk, PskStore};
 pub use session::Session;

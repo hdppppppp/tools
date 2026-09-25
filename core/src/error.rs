@@ -34,9 +34,20 @@ pub enum CryptoError {
     #[error("会话序号空间耗尽，必须重新握手")]
     SequenceExhausted,
 
-    #[error("预共享密钥不存在：psk_id={0}")]
-    UnknownPskId(String),
-
+    // 这里**刻意没有** `UnknownPskId` 这个变体。
+    //
+    // 它曾经存在，并且被 `accept_client_hello` 在「psk_id 查不到」时返回。
+    // 那是个信息泄露：psk_id 只是版本标签（`prod-v1` 这种），不是秘密，攻击者
+    // 可以用不同的 id 反复握手，靠「返回的是 UnknownPskId 还是
+    // HandshakeAuthFailed」把服务端配置的 id 枚举出来 —— 一旦确认 id，他就省掉
+    // 了猜 id 这一步，只需要专心对付密钥。而且这条路径还少算一次 HKDF + HMAC，
+    // 就算统一了错误码，响应时间仍然能被用来问同一个问题。
+    //
+    // 现在「id 不认识」和「MAC 不对」统一返回 [`CryptoError::HandshakeAuthFailed`]，
+    // 且两者计算量相同。运维需要的「客户端发的是哪个 id」由
+    // `handshake::peek_psk_id` 单独提供 —— 那条路径只写日志，不回客户端。
+    //
+    // 不要为了「错误信息更友好」把它加回来。
     #[error("密钥材料长度非法：期望 {expected} 字节，实际 {got} 字节")]
     InvalidKeyLength { expected: usize, got: usize },
 

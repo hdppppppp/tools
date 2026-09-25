@@ -37,13 +37,15 @@
 //! 认下这次握手并派生出**同一个**会话密钥 —— 攻击者就能解密该会话的流量。
 //! 绑定之后，重放的 ClientHello 会被服务端的 cnonce 缓存挡住。
 
+use std::collections::{HashSet, VecDeque};
+
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::Zeroize;
 
 use crate::error::{CryptoError, Result};
 use crate::kdf::{
     constant_time_eq, derive_handshake_key, derive_session_keys, hmac_sha256, RandomSource,
-    SessionKeys,
+    SessionKeys, PSK_LEN,
 };
 use crate::protocol::{
     CLIENT_HELLO_MIN_LEN, CLIENT_HELLO_PREFIX_LEN, CLIENT_HELLO_SUFFIX_LEN,
@@ -55,6 +57,35 @@ use crate::session::Session;
 
 /// 握手消息的 MAC 长度。
 const MAC_LEN: usize = 32;
+
+/// 占位 PSK：`psk_id` 查不到时用它走完**完全相同**的 MAC 计算路径。
+///
+/// 目的只有一个 —— 抹掉「id 存在」与「id 不存在」之间的耗时差。它永远不会
+/// 导致任何消息被接受：调用点先判 `psk.is_none()`，占位密钥只是让计算量对齐。
+const PLACEHOLDER_PSK: [u8; PSK_LEN] = [0u8; PSK_LEN];
+
+/// 从 ClientHello 里取出 `psk_id`，**不做任何校验**。
+///
+/// 存在的理由是补上「统一错误」带来的运维盲区：`accept_client_hello` 现在对
+/// 「id 不认识」和「MAC 不对」返回同一个错误（否则等于给攻击者一个枚举
+/// psk_id 的接口），但线上排查密钥轮换问题时又确实需要知道客户端发的是哪个 id。
+///
+/// 所以把这条线索单独开一个口子：**服务端在 accept 失败时调用它写日志**，
+/// 而不是把 id 塞进错误消息 —— 错误消息会原样回给客户端，而日志不会。
+///
+/// ⚠️ 返回值来自未经认证的输入，**只能写日志，不能用来做任何决策**。
+/// 调用方还要自行转义：它可能包含换行符等控制字符（日志注入）。
+pub fn peek_psk_id(client_hello: &[u8]) -> Option<&str> {
+    if client_hello.len() < CLIENT_HELLO_MIN_LEN {
+        return None;
+    }
+    let psk_id_len = client_hello[1] as usize;
+    let end = CLIENT_HELLO_PREFIX_LEN.checked_add(psk_id_len)?;
+    if client_hello.len() != end + CLIENT_HELLO_SUFFIX_LEN {
+        return None;
+    }
+    core::str::from_utf8(&client_hello[CLIENT_HELLO_PREFIX_LEN..end]).ok()
+}
 
 /// 校验时间戳是否在允许窗口内。
 ///
@@ -71,15 +102,45 @@ fn check_timestamp(ts_ms: u64, now_ms: u64, limit_ms: u64) -> Result<()> {
     Ok(())
 }
 
+/// 握手 nonce 缓存的条目上限。
+///
+/// 没有上限的话，一个持有合法 PSK 的客户端（或拿到泄露 PSK 的攻击者）可以在
+/// 10 分钟窗口内无限灌入随机 nonce，把内存吃光。有了上限之后，攻击退化成
+/// 「最旧的条目被挤掉」—— 被挤掉的 nonce 属于一个已经完成握手的客户端，
+/// 攻击者重放它的 hello 最多让服务端多建一条会话（攻击者本来就有 PSK，
+/// 正常握手也能建），拿不到额外好处。
+///
+/// 65536 条 × 24 字节 ≈ 1.5 MiB，对应 10 分钟窗口内约 109 次握手/秒的持续
+/// 速率，对音乐 App 这种量级绰绰有余。
+const MAX_HELLO_REPLAY_ENTRIES: usize = 65_536;
+
+/// 两次按时间淘汰之间的最小间隔。
+///
+/// 淘汰要遍历整个队列。每次插入都做的话，缓存接近上限时每次握手都要走 6.5 万
+/// 步 —— 攻击者用握手请求就能把这个 O(n) 放大成 CPU 耗尽。
+///
+/// 延迟淘汰**没有正确性代价**：nonce 是 16 字节随机值，正常客户端不会重复使用，
+/// 多留一会儿只是多占一点内存，而上限已经封住了内存。
+const EVICT_MIN_INTERVAL_MS: u64 = 1_000;
+
 /// 握手 nonce 的防重放缓存。
 ///
 /// 只需要挡住「同一个 ClientHello 被重发」这一种情况，所以按时间窗淘汰即可，
 /// 不需要持久化。窗口取时间戳窗口的两倍，保证一个 nonce 在它还有可能通过
 /// 时间戳校验的整个期间都被记住。
+///
+/// 内部用「哈希集查重 + 队列记序」而不是一个 `Vec` 线性扫描：查重是每次握手
+/// 都要走的路径，做成 O(n) 等于给攻击者一个放大器 —— 他只要持续发握手，
+/// 就能让每一次请求都付出「缓存当前大小」的代价。
 #[derive(Debug)]
 pub struct HelloReplayCache {
-    entries: Vec<(u64, [u8; HELLO_NONCE_LEN])>,
+    /// 按插入顺序排列，用于按时间淘汰和超限兜底。
+    order: VecDeque<(u64, [u8; HELLO_NONCE_LEN])>,
+    /// 与 `order` 同内容，把「见过这个 nonce 吗」从 O(n) 降到 O(1)。
+    seen: HashSet<[u8; HELLO_NONCE_LEN]>,
     window_ms: u64,
+    /// 上次按时间淘汰的时刻，用于限制淘汰频率。
+    last_evict_ms: u64,
 }
 
 impl Default for HelloReplayCache {
@@ -91,25 +152,50 @@ impl Default for HelloReplayCache {
 impl HelloReplayCache {
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            order: VecDeque::new(),
+            seen: HashSet::new(),
             window_ms: TIMESTAMP_SKEW_MS * 2,
+            last_evict_ms: 0,
         }
     }
 
     /// 检查并记录一个 nonce。返回 `false` 表示见过（重放）。
     pub fn check_and_insert(&mut self, nonce: [u8; HELLO_NONCE_LEN], now_ms: u64) -> bool {
-        self.evict(now_ms);
-        if self.entries.iter().any(|(_, n)| n == &nonce) {
+        self.evict_if_due(now_ms);
+
+        // `insert` 返回 false 就说明已经在了 —— 顺便完成查重，不用再扫一遍。
+        if !self.seen.insert(nonce) {
             return false;
         }
-        self.entries.push((now_ms, nonce));
+        self.order.push_back((now_ms, nonce));
+
+        // 上限兜底：淘汰还没到期也不能让内存无限涨。
+        while self.order.len() > MAX_HELLO_REPLAY_ENTRIES {
+            self.pop_front();
+        }
         true
     }
 
-    fn evict(&mut self, now_ms: u64) {
+    fn pop_front(&mut self) {
+        if let Some((_, nonce)) = self.order.pop_front() {
+            self.seen.remove(&nonce);
+        }
+    }
+
+    fn evict_if_due(&mut self, now_ms: u64) {
+        if now_ms.saturating_sub(self.last_evict_ms) < EVICT_MIN_INTERVAL_MS {
+            return;
+        }
+        self.last_evict_ms = now_ms;
+
         let window = self.window_ms;
-        self.entries
-            .retain(|(ts, _)| now_ms.saturating_sub(*ts) <= window);
+        // 队列是按时间递增的，所以从队首一路弹出到第一个未过期即可。
+        while let Some((ts, _)) = self.order.front() {
+            if now_ms.saturating_sub(*ts) <= window {
+                break;
+            }
+            self.pop_front();
+        }
     }
 
     /// 仅测试使用：断言缓存条目数。
@@ -120,7 +206,7 @@ impl HelloReplayCache {
     /// 只为了对称而存在的空方法。
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.entries.len()
+        self.order.len()
     }
 }
 
@@ -357,7 +443,7 @@ impl ClientHandshake {
         rng.fill(&mut client_nonce)?;
 
         let eph_pub = PublicKey::from(&ephemeral);
-        let handshake_key = derive_handshake_key(psk.key(), psk.id().as_bytes());
+        let mut handshake_key = derive_handshake_key(psk.key(), psk.id().as_bytes());
 
         let mut signed = Vec::with_capacity(CLIENT_HELLO_MIN_LEN);
         signed.push(PROTOCOL_VERSION);
@@ -368,6 +454,9 @@ impl ClientHandshake {
         signed.extend_from_slice(&now_ms.to_be_bytes());
 
         let mac = hmac_sha256(&handshake_key, &signed);
+        // 派生出来的握手密钥用完即擦。它与相邻的 `secret_bytes.zeroize()` 是
+        // 同一条规矩：本模块里凡是「从 PSK 或共享秘密算出来的东西」都不留在栈上。
+        handshake_key.zeroize();
         let hello = encode_client_hello(psk.id(), &client_nonce, &eph_pub, now_ms, &mac);
 
         Ok((
@@ -385,9 +474,11 @@ impl ClientHandshake {
         let parsed = parse_server_hello(server_hello)?;
         check_timestamp(parsed.ts_ms, now_ms, TIMESTAMP_SKEW_MS)?;
 
-        let handshake_key = derive_handshake_key(self.psk.key(), self.psk.id().as_bytes());
+        let mut handshake_key = derive_handshake_key(self.psk.key(), self.psk.id().as_bytes());
         let expected_mac = hmac_sha256(&handshake_key, &server_hello[..parsed.signed_len]);
-        if !constant_time_eq(&expected_mac, &server_hello[parsed.signed_len..]) {
+        let mac_ok = constant_time_eq(&expected_mac, &server_hello[parsed.signed_len..]);
+        handshake_key.zeroize();
+        if !mac_ok {
             return Err(CryptoError::HandshakeAuthFailed);
         }
 
@@ -425,8 +516,11 @@ pub struct AcceptedHandshake {
 
 /// 服务端处理 ClientHello。
 ///
-/// 失败时**不要**把具体原因回给客户端（回一个统一的 400 就够）：
-/// 区分「psk_id 不存在」和「MAC 不对」等于告诉攻击者他的 psk_id 猜对了。
+/// **所有失败都返回同一个 [`CryptoError::HandshakeAuthFailed`]**（除了长度/版本
+/// 这类格式错误）：区分「psk_id 不存在」和「MAC 不对」等于告诉攻击者他的
+/// psk_id 猜对了，而 psk_id 是可以被枚举的。调用方也**不要**把具体原因回给
+/// 客户端（回一个统一的 400 就够）；需要排查时用 [`peek_psk_id`] 单独取 id
+/// 写日志。
 pub fn accept_client_hello<R: RandomSource>(
     store: &PskStore,
     client_hello: &[u8],
@@ -439,19 +533,36 @@ pub fn accept_client_hello<R: RandomSource>(
     // 时间戳先查：它不需要任何密钥，最便宜。
     check_timestamp(parsed.ts_ms, now_ms, TIMESTAMP_SKEW_MS)?;
 
-    let psk = store
-        .get(&parsed.psk_id)
-        .ok_or_else(|| CryptoError::UnknownPskId(parsed.psk_id.clone()))?;
-
-    let handshake_key = derive_handshake_key(psk.key(), psk.id().as_bytes());
+    // ⚠️ psk_id 查不到时**不能提前返回**，两个原因：
+    //
+    // ① 返回一个不同的错误码，等于确认「这个 psk_id 存在」。psk_id 只是版本
+    //    标签（`prod-v1` 这种），不是秘密，可以被枚举 —— 一旦确认，攻击者就
+    //    省掉了猜 id 这一步，只需要专心对付密钥。
+    // ② 提前返回还会省掉一次 HKDF + HMAC，形成可测的时序差。就算把错误码
+    //    统一了，攻击者靠响应时间仍然能问出同一个问题。
+    //
+    // 所以查不到时用一条固定的占位密钥走完**完全相同**的计算路径，最后统一
+    // 返回 HandshakeAuthFailed —— 与「MAC 不对」在错误码和耗时上都不可区分。
+    //
+    // 代价是运维失去了「客户端用的 id 我不认识」这条线索。补偿手段是
+    // [`peek_psk_id`]：服务端在 accept 失败时单独取出来写日志，那条路径不回给
+    // 客户端。
+    let psk = store.get(&parsed.psk_id);
+    let mut handshake_key = match psk {
+        Some(psk) => derive_handshake_key(psk.key(), psk.id().as_bytes()),
+        None => derive_handshake_key(&PLACEHOLDER_PSK, b""),
+    };
     let expected_mac = hmac_sha256(&handshake_key, &client_hello[..parsed.signed_len]);
-    if !constant_time_eq(&expected_mac, &client_hello[parsed.signed_len..]) {
+    let mac_ok = constant_time_eq(&expected_mac, &client_hello[parsed.signed_len..]);
+    if psk.is_none() || !mac_ok {
+        handshake_key.zeroize();
         return Err(CryptoError::HandshakeAuthFailed);
     }
 
     // nonce 缓存放在 MAC 校验**之后**：否则攻击者可以拿伪造的 hello 灌满缓存，
     // 把真客户端的 nonce 挤出去（内存耗尽 + 拒绝服务）。
     if !replay_cache.check_and_insert(parsed.client_nonce, now_ms) {
+        handshake_key.zeroize();
         return Err(CryptoError::ReplayDetected { seq: 0 });
     }
 
@@ -475,6 +586,7 @@ pub fn accept_client_hello<R: RandomSource>(
     signed.extend_from_slice(&ttl_secs.to_be_bytes());
 
     let mac = hmac_sha256(&handshake_key, &signed);
+    handshake_key.zeroize();
     let response = encode_server_hello(
         &session_id,
         &parsed.client_nonce,
@@ -609,7 +721,69 @@ mod tests {
         let mut cache = HelloReplayCache::new();
         let err =
             accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap_err();
-        assert!(matches!(err, CryptoError::UnknownPskId(_)));
+        // 必须是**统一的**认证失败，不能是 UnknownPskId —— 后者等于告诉攻击者
+        // 「这个 psk_id 存在」，把 psk_id 变成可以枚举的。
+        assert_eq!(err, CryptoError::HandshakeAuthFailed);
+    }
+
+    #[test]
+    fn unknown_psk_id_is_indistinguishable_from_wrong_key() {
+        // 两种失败必须返回完全一样的错误，否则攻击者能用错误码枚举 psk_id。
+        let mut rng = SeqRandom(1);
+        let mut cache_a = HelloReplayCache::new();
+        let mut cache_b = HelloReplayCache::new();
+
+        // 情形一：id 存在，但密钥不对。
+        let wrong_key = Psk::new("prod-v1", [0x33; PSK_LEN]).unwrap();
+        let (_hs, hello_a) = ClientHandshake::start(wrong_key, NOW, &mut rng).unwrap();
+        let err_a = accept_client_hello(&server_store(), &hello_a, NOW, &mut cache_a, &mut rng)
+            .unwrap_err();
+
+        // 情形二：id 根本不存在。
+        let unknown = Psk::new("staging", [0x22; PSK_LEN]).unwrap();
+        let (_hs, hello_b) = ClientHandshake::start(unknown, NOW, &mut rng).unwrap();
+        let err_b = accept_client_hello(&server_store(), &hello_b, NOW, &mut cache_b, &mut rng)
+            .unwrap_err();
+
+        assert_eq!(err_a, err_b, "两种失败必须不可区分");
+    }
+
+    #[test]
+    fn peek_psk_id_reads_id_without_authenticating() {
+        let mut rng = SeqRandom(1);
+        let (_hs, hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        assert_eq!(peek_psk_id(&hello), Some("prod-v1"));
+
+        // 长度对不上时必须返回 None，不能越界读。
+        assert_eq!(peek_psk_id(&hello[..10]), None);
+        assert_eq!(peek_psk_id(&[]), None);
+    }
+
+    #[test]
+    fn hello_replay_cache_is_bounded() {
+        // 灌入远超上限的随机 nonce，内存必须被上限封住。
+        let mut cache = HelloReplayCache::new();
+        let limit = MAX_HELLO_REPLAY_ENTRIES;
+        for i in 0..(limit + 1000) {
+            let mut nonce = [0u8; HELLO_NONCE_LEN];
+            nonce[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            // 时间固定在窗口内，确保淘汰逻辑不会替我们兜底 —— 这里要验的正是
+            // 「按时间淘汰没生效时，上限仍然挡得住」。
+            assert!(cache.check_and_insert(nonce, NOW));
+        }
+        assert_eq!(cache.len(), limit, "缓存必须被上限封住");
+    }
+
+    #[test]
+    fn hello_replay_cache_still_detects_replay_after_eviction_gate() {
+        // 淘汰被限频之后，「重复 nonce」仍然必须被立刻发现 —— 查重走的是哈希集，
+        // 与淘汰频率无关。
+        let mut cache = HelloReplayCache::new();
+        let nonce = [7u8; HELLO_NONCE_LEN];
+        assert!(cache.check_and_insert(nonce, NOW));
+        // 同一毫秒内再插一次：淘汰会被限频跳过，但查重不能失效。
+        assert!(!cache.check_and_insert(nonce, NOW));
+        assert!(!cache.check_and_insert(nonce, NOW + 10));
     }
 
     #[test]

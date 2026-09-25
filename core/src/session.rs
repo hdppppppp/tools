@@ -86,7 +86,12 @@ impl Session {
         }
         let total = self.expires_at_ms.saturating_sub(self.created_at_ms);
         let elapsed = now_ms.saturating_sub(self.created_at_ms);
-        elapsed * 10 >= total * 9
+        // 用 `saturating_mul` 而不是 `*`：`now_ms` 由宿主传入，一个离谱的时间戳
+        // （0、u64::MAX、或者误把秒当成毫秒）会让 `elapsed * 10` 溢出 ——
+        // debug 下直接 panic，release 下（`overflow-checks = false`）静默回绕成
+        // 一个小数字，于是「早就该 rekey」被判成「还早」。
+        // 会话是否真的过期另有 `is_expired` 把关，这里只负责把判断算对。
+        elapsed.saturating_mul(10) >= total.saturating_mul(9)
     }
 
     /// 加密一段明文，返回可直接作为请求/响应体发送的帧。
@@ -128,10 +133,19 @@ impl Session {
 
     /// 解密一个帧。
     ///
-    /// 校验顺序是刻意的：**时间戳 → 解密 → 防重放**。
-    /// - 时间戳最便宜，先挡掉明显过期的帧。
-    /// - 防重放放最后，是因为只有在解密成功后才值得占用滑窗的一个位置；
-    ///   否则攻击者可以拿伪造帧把滑窗填满，把真帧挤成「重放」。
+    /// 实际顺序是 **解密 → 时间戳 → 防重放**。
+    ///
+    /// ⚠️ 时间戳**不可能**排在解密前面：它就在帧头里，而帧头是 AAD 的一部分，
+    /// 在 AEAD 校验通过之前它是攻击者可以随意改的字节。想「先看时间戳再解密」，
+    /// 看到的只是一个未经认证的、由攻击者提供的数字 —— 拿它做拒绝决策等于白送
+    /// 对方一个丢弃开关。
+    ///
+    /// 所以这里的取舍是「付一次 AEAD 解密的代价，换一个可信的时间戳」。真要省这
+    /// 一次解密，只能用 [`Session::peek_header`] 读**未认证**的时间戳做廉价预筛
+    /// （明显超出窗口的直接丢），但那只是优化，最终判断必须落在这一次。
+    ///
+    /// 防重放放最后则是刻意的：只有解密成功才值得占用滑窗的一个位置，否则攻击者
+    /// 可以拿伪造帧把滑窗填满，把真帧挤成「重放」。
     pub fn open(&mut self, aad_context: &[u8], frame: &[u8], now_ms: u64) -> Result<OpenedFrame> {
         let opened = open_frame(&self.keys.open_key, &self.id, aad_context, frame)?;
 
@@ -316,6 +330,20 @@ mod tests {
         assert!(!c.needs_rekey(NOW), "刚建立不该要求 rekey");
         // 走到 90% 有效期时应提前要求 rekey，避免过期瞬间惊群。
         assert!(c.needs_rekey(NOW + 901_000));
+    }
+
+    #[test]
+    fn needs_rekey_survives_absurd_clock() {
+        // `now_ms` 由宿主传入，可能是一个离谱的值。测试跑在 debug profile 下
+        // （`overflow-checks` 默认开），所以这里一旦回绕就会直接 panic ——
+        // 这条用例就是那个 panic 的哨兵。
+        let (c, _s) = session_pair(1000);
+        assert!(
+            c.needs_rekey(u64::MAX),
+            "远超有效期必须要求 rekey，且不能溢出"
+        );
+        // 时间为 0 时 elapsed 被 saturating 成 0，等价于「刚建立」。
+        assert!(!c.needs_rekey(0));
     }
 
     #[test]

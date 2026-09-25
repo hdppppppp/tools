@@ -15,8 +15,6 @@
 //! 帧头（version/seq/ts_ms）进 AAD，所以它自己也受认证保护 —— 攻击者改不动
 //! 序号或时间戳来绕过重放检测。
 
-use zeroize::Zeroize;
-
 use crate::aead;
 use crate::error::{CryptoError, Result};
 use crate::kdf::{random_array, KEY_LEN};
@@ -215,15 +213,15 @@ pub fn open_frame(
     header.copy_from_slice(&frame[..FRAME_HEADER_LEN]);
     let aad = build_aad(session_id, aad_context, &header);
 
-    let mut plaintext = aead::open(key, &nonce, &aad, ciphertext)?;
-    let result = OpenedFrame {
+    // 明文的生命周期归调用方 —— 它就是返回值本身。这里不做「拷贝一份再擦掉
+    // 原件」那种操作：被擦掉的是那份没人再看的副本，真正交出去的拷贝仍然
+    // 留在内存里，除了白白多一次全量拷贝之外什么也没保护到。
+    let plaintext = aead::open(key, &nonce, &aad, ciphertext)?;
+    Ok(OpenedFrame {
         seq,
         ts_ms,
-        // 先把明文拷出来再返回，避免调用方持有内部缓冲区的引用。
-        plaintext: plaintext.clone(),
-    };
-    plaintext.zeroize();
-    Ok(result)
+        plaintext,
+    })
 }
 
 #[cfg(test)]

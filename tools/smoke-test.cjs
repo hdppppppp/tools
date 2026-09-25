@@ -160,14 +160,43 @@ check('跨端点重放被拒绝（AAD 绑定生效）', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. 错误 PSK 无法握手
+// 6. 错误 PSK 无法握手，且「id 不认识」与「密钥不对」必须不可区分
 // ---------------------------------------------------------------------------
+function acceptErrorMessage(hello) {
+  try {
+    server.accept(hello, now);
+    return null;
+  } catch (err) {
+    return err.message;
+  }
+}
+
 check('错误 PSK 握手被拒绝', () => {
   const badClient = new m.Client(PSK_ID, 'b2'.repeat(32));
   const badHello = badClient.handshake(now);
   assert.throws(
     () => server.accept(badHello, now),
     '错误 PSK 也能握手成功，PSK 认证形同虚设',
+  );
+});
+
+check('未知 psk_id 与错误密钥返回同一种失败', () => {
+  // 两者必须不可区分，否则攻击者可以拿不同的 id 反复握手，靠错误消息把
+  // 服务端配置了哪些 psk_id 枚举出来 —— 一旦确认 id，他就省掉了猜 id 这一步。
+  const wrongKey = acceptErrorMessage(
+    new m.Client(PSK_ID, 'b2'.repeat(32)).handshake(now),
+  );
+  const unknownId = acceptErrorMessage(
+    new m.Client('no-such-psk-id', 'b2'.repeat(32)).handshake(now),
+  );
+  assert.ok(wrongKey, '错误密钥居然握手成功了');
+  assert.ok(unknownId, '未知 psk_id 居然握手成功了');
+  assert.equal(
+    wrongKey,
+    unknownId,
+    `两种失败的消息必须一致，否则可以枚举 psk_id：\n` +
+      `    错误密钥 → ${wrongKey}\n` +
+      `    未知 id  → ${unknownId}`,
   );
 });
 

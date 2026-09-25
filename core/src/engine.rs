@@ -31,6 +31,17 @@ use crate::session::Session;
 /// 每次握手的成本几乎为零，而会话对象会一直留在表里。
 pub const MAX_SERVER_SESSIONS: usize = 100_000;
 
+/// 两次全表清理之间的最小间隔。
+///
+/// 清理是 O(n) 的 `retain`。放在每次 `accept` 里无条件执行的话，会话表接近上限
+/// （10 万）时**每一次握手都要扫 10 万条** —— 攻击者只要持续发握手请求，就能用
+/// 极低的成本把服务端 CPU 打满。限频之后，清理的摊销成本从「每握手 O(n)」
+/// 变成「每秒 O(n)」。
+///
+/// 延迟清理没有正确性代价：过期会话在被访问时会顺手回收（见 `seal` / `open`），
+/// 而且表满时仍然会强制清一次来腾位置。
+const SWEEP_MIN_INTERVAL_MS: u64 = 30_000;
+
 /// 客户端引擎：持有 PSK、握手中间态和已建立的会话。
 ///
 /// 生命周期由宿主语言管理（JNI 是 long 句柄，wasm-bindgen / napi 是对象）。
@@ -159,6 +170,8 @@ pub struct ServerEngine {
     psks: PskStore,
     hello_replay: HelloReplayCache,
     sessions: HashMap<[u8; SESSION_ID_LEN], Session>,
+    /// 上次全表清理的时刻，用于限制清理频率（见 [`SWEEP_MIN_INTERVAL_MS`]）。
+    last_sweep_ms: u64,
 }
 
 impl Default for ServerEngine {
@@ -173,6 +186,7 @@ impl ServerEngine {
             psks: PskStore::new(),
             hello_replay: HelloReplayCache::new(),
             sessions: HashMap::new(),
+            last_sweep_ms: 0,
         }
     }
 
@@ -201,7 +215,15 @@ impl ServerEngine {
     ) -> Result<Vec<u8>> {
         // 清理放在最前面：否则「表满了」会在客户端已通过 MAC 校验之后才拒绝，
         // 白白消耗一次 X25519 运算。
-        self.sweep_expired(now_ms);
+        //
+        // 但必须限频 —— 清理是 O(n) 的，无条件放在每次握手里等于给攻击者一个
+        // 放大器：发一次握手就让服务端扫一遍整张会话表。表满时必须清（要腾
+        // 位置），否则按固定间隔清就够了。
+        let at_capacity = self.sessions.len() >= MAX_SERVER_SESSIONS;
+        if at_capacity || now_ms.saturating_sub(self.last_sweep_ms) >= SWEEP_MIN_INTERVAL_MS {
+            self.sweep_expired(now_ms);
+            self.last_sweep_ms = now_ms;
+        }
         if self.sessions.len() >= MAX_SERVER_SESSIONS {
             return Err(CryptoError::SessionNotReady);
         }
@@ -489,6 +511,25 @@ mod tests {
     }
 
     #[test]
+    fn accept_sweeps_expired_sessions_when_due() {
+        let (mut client, mut server) = pair();
+        connect(&mut client, &mut server, NOW);
+        assert_eq!(server.session_count(), 1);
+
+        // 既超过会话 TTL，也超过了清理间隔 —— 再握手时旧会话应被顺带清掉。
+        // 这条锁住的是「限频不等于不清理」：清理被限频之后，如果哪天把
+        // 「到期」判断改错，过期会话会一直堆在表里直到触顶。
+        let later = NOW + 31 * 60 * 1000;
+        let hello = client.handshake(later).unwrap();
+        server.accept(&hello, later).unwrap();
+        assert_eq!(
+            server.session_count(),
+            1,
+            "过期的旧会话应被清掉，只剩刚建的这条"
+        );
+    }
+
+    #[test]
     fn expired_session_access_evicts_it() {
         let (mut client, mut server) = pair();
         connect(&mut client, &mut server, NOW);
@@ -552,10 +593,12 @@ mod tests {
         server.put_psk("prod-v1", PSK_HEX).unwrap();
         let mut client = ClientEngine::new("staging", &"aa".repeat(32)).unwrap();
         let hello = client.handshake(NOW).unwrap();
-        assert!(matches!(
+        // 统一返回认证失败，而不是「不认识这个 psk_id」—— 后者会把 psk_id
+        // 变成可以枚举的。详见 error.rs 里那段说明。
+        assert_eq!(
             server.accept(&hello, NOW).unwrap_err(),
-            CryptoError::UnknownPskId(_)
-        ));
+            CryptoError::HandshakeAuthFailed
+        );
         assert_eq!(server.session_count(), 0);
     }
 
