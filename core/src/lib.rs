@@ -55,7 +55,7 @@
 //! - **不替代 TLS**。这是应用层的第二道防线，用来抬高抓包和重放的门槛，
 //!   不是用来在明文 HTTP 上裸奔的。
 //!
-//! 详细边界见 `plans/008-rust-crypto-layer.md`。
+//! 详细边界见 `docs/design.md` 的「目标与边界」章节。
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_debug_implementations)]

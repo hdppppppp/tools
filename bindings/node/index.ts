@@ -229,7 +229,7 @@ export class TaotaoCryptoTokens {
  * - `coverUrl` / `apkUrl` 是客户端直接交给图片库和下载器的，不带鉴权头
  * - 静态资源与健康检查
  *
- * 完整清单见 `plans/008-rust-crypto-layer.md` 第七节。
+ * 完整清单与逐条理由见 `docs/design.md` 的「与现有契约的边界」章节。
  */
 export const ENCRYPTION_EXEMPT_PATTERNS: readonly RegExp[] = [
   /^\/health$/,
