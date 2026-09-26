@@ -675,8 +675,7 @@ mod tests {
     #[test]
     fn from_embedded_roundtrips_against_matching_server() {
         // 服务端登记与内嵌产物相同的占位 PSK（同 id 同种子派生），握手与收发应通。
-        let (placeholder, is_real) =
-            crate::build_psk_or_placeholder("prod-v1").unwrap();
+        let (placeholder, is_real) = crate::build_psk_or_placeholder("prod-v1").unwrap();
         assert!(!is_real, "测试构建必然是占位密钥");
         let mut client = ClientEngine::from_embedded("prod-v1", DEVICE).unwrap();
         let mut server = ServerEngine::new();
