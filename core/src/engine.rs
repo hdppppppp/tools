@@ -76,7 +76,8 @@ impl ClientEngine {
 
     /// 同 [`ClientEngine::handshake`]，但允许注入随机源（测试用）。
     pub fn handshake_with<R: RandomSource>(&mut self, now_ms: u64, rng: &mut R) -> Result<Vec<u8>> {
-        let (pending, hello) = ClientHandshake::start(self.psk.clone(), &self.device_id, now_ms, rng)?;
+        let (pending, hello) =
+            ClientHandshake::start(self.psk.clone(), &self.device_id, now_ms, rng)?;
         self.pending = Some(pending);
         self.session = None;
         Ok(hello)
@@ -210,7 +211,12 @@ impl ServerEngine {
     ///
     /// `device_id` 由外层传输携带（握手 HTTP 体里的字段），服务端用它折进握手
     /// 密钥派生。设备号与客户端不一致时 MAC 失配、握手被拒。
-    pub fn accept(&mut self, client_hello: &[u8], device_id: &[u8], now_ms: u64) -> Result<Vec<u8>> {
+    pub fn accept(
+        &mut self,
+        client_hello: &[u8],
+        device_id: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<u8>> {
         let mut rng = OsRandom;
         self.accept_with(client_hello, device_id, now_ms, &mut rng)
     }
@@ -580,7 +586,8 @@ mod tests {
         assert_eq!(server.psk_count(), 2);
 
         // 新客户端用 v2 也能握手（灰度期新旧并存）。
-        let mut new_client = ClientEngine::new("prod-v2", "ff".repeat(32).as_str(), DEVICE).unwrap();
+        let mut new_client =
+            ClientEngine::new("prod-v2", "ff".repeat(32).as_str(), DEVICE).unwrap();
         connect(&mut new_client, &mut server, NOW + 1000);
         assert!(new_client.has_session(NOW + 1000));
 

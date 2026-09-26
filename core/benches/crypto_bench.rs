@@ -205,11 +205,13 @@ fn bench_session_roundtrip() {
 
     let (psk, _) = build_psk_or_placeholder("bench").unwrap();
     let mut rng = OsRandom;
-    let (handshake, hello) = ClientHandshake::start(psk.clone(), b"bench-device", NOW, &mut rng).unwrap();
+    let (handshake, hello) =
+        ClientHandshake::start(psk.clone(), b"bench-device", NOW, &mut rng).unwrap();
     let mut store = PskStore::new();
     store.insert(psk);
     let mut cache = HelloReplayCache::new();
-    let accepted = accept_client_hello(&store, &hello, b"bench-device", NOW, &mut cache, &mut rng).unwrap();
+    let accepted =
+        accept_client_hello(&store, &hello, b"bench-device", NOW, &mut cache, &mut rng).unwrap();
     let mut client = handshake.finish(&accepted.response, NOW).unwrap();
     let mut server = accepted.session;
 
@@ -221,11 +223,17 @@ fn bench_session_roundtrip() {
     let mut n = 0usize;
     let m = measure(20_000, || {
         if n % REBUILD_EVERY == 0 {
-            let (h, hello) =
-                ClientHandshake::start(build_psk_or_placeholder("bench").unwrap().0, b"bench-device", NOW, &mut rng)
-                    .unwrap();
+            let (h, hello) = ClientHandshake::start(
+                build_psk_or_placeholder("bench").unwrap().0,
+                b"bench-device",
+                NOW,
+                &mut rng,
+            )
+            .unwrap();
             let mut cache = HelloReplayCache::new();
-            let acc = accept_client_hello(&store, &hello, b"bench-device", NOW, &mut cache, &mut rng).unwrap();
+            let acc =
+                accept_client_hello(&store, &hello, b"bench-device", NOW, &mut cache, &mut rng)
+                    .unwrap();
             client = h.finish(&acc.response, NOW).unwrap();
             server = acc.session;
         }
@@ -246,11 +254,16 @@ fn bench_handshake() {
     let mut rng = OsRandom;
 
     let m = measure(5_000, || {
-        let (h, hello) =
-            ClientHandshake::start(build_psk_or_placeholder("bench").unwrap().0, b"bench-device", NOW, &mut rng)
-                .unwrap();
+        let (h, hello) = ClientHandshake::start(
+            build_psk_or_placeholder("bench").unwrap().0,
+            b"bench-device",
+            NOW,
+            &mut rng,
+        )
+        .unwrap();
         let mut cache = HelloReplayCache::new();
-        let acc = accept_client_hello(&store, &hello, b"bench-device", NOW, &mut cache, &mut rng).unwrap();
+        let acc = accept_client_hello(&store, &hello, b"bench-device", NOW, &mut cache, &mut rng)
+            .unwrap();
         black_box(h.finish(&acc.response, NOW).unwrap());
     });
     print_row("ClientHello + ServerHello", 0, &m);

@@ -233,7 +233,9 @@ pub extern "system" fn Java_com_taotao_music_crypto_NativeCrypto_clientNew<'loca
     let psk_hex = read_string(&psk_hex);
     let device_id = read_string(&device_id);
     run(&mut env, 0, |_env| {
-        Ok(insert(Entry::Client(ClientEngine::new(&psk_id, &psk_hex, &device_id)?)))
+        Ok(insert(Entry::Client(ClientEngine::new(
+            &psk_id, &psk_hex, &device_id,
+        )?)))
     })
 }
 

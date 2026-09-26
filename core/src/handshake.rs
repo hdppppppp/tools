@@ -657,12 +657,20 @@ mod tests {
     #[test]
     fn full_handshake_establishes_matching_sessions() {
         let mut rng = SeqRandom(1);
-        let (client_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
+        let (client_hs, hello) =
+            ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         assert_eq!(hello[0], PROTOCOL_VERSION);
 
         let mut cache = HelloReplayCache::new();
-        let accepted =
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW + 10, &mut cache, &mut rng).unwrap();
+        let accepted = accept_client_hello(
+            &server_store(),
+            &hello,
+            DEVICE,
+            NOW + 10,
+            &mut cache,
+            &mut rng,
+        )
+        .unwrap();
 
         let client_session = client_hs.finish(&accepted.response, NOW + 20).unwrap();
 
@@ -713,8 +721,8 @@ mod tests {
 
         accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
         // 同一个 hello 原样重发 —— 这是握手重放，必须挡住。
-        let err =
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
+        let err = accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng)
+            .unwrap_err();
         assert!(matches!(err, CryptoError::ReplayDetected { .. }));
     }
 
@@ -734,8 +742,8 @@ mod tests {
         let other = Psk::new("staging", [0x22; PSK_LEN]).unwrap();
         let (_hs, hello) = ClientHandshake::start(other, DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
-        let err =
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
+        let err = accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng)
+            .unwrap_err();
         // 必须是**统一的**认证失败，不能是 UnknownPskId —— 后者等于告诉攻击者
         // 「这个 psk_id 存在」，把 psk_id 变成可以枚举的。
         assert_eq!(err, CryptoError::HandshakeAuthFailed);
@@ -751,14 +759,28 @@ mod tests {
         // 情形一：id 存在，但密钥不对。
         let wrong_key = Psk::new("prod-v1", [0x33; PSK_LEN]).unwrap();
         let (_hs, hello_a) = ClientHandshake::start(wrong_key, DEVICE, NOW, &mut rng).unwrap();
-        let err_a = accept_client_hello(&server_store(), &hello_a, DEVICE, NOW, &mut cache_a, &mut rng)
-            .unwrap_err();
+        let err_a = accept_client_hello(
+            &server_store(),
+            &hello_a,
+            DEVICE,
+            NOW,
+            &mut cache_a,
+            &mut rng,
+        )
+        .unwrap_err();
 
         // 情形二：id 根本不存在。
         let unknown = Psk::new("staging", [0x22; PSK_LEN]).unwrap();
         let (_hs, hello_b) = ClientHandshake::start(unknown, DEVICE, NOW, &mut rng).unwrap();
-        let err_b = accept_client_hello(&server_store(), &hello_b, DEVICE, NOW, &mut cache_b, &mut rng)
-            .unwrap_err();
+        let err_b = accept_client_hello(
+            &server_store(),
+            &hello_b,
+            DEVICE,
+            NOW,
+            &mut cache_b,
+            &mut rng,
+        )
+        .unwrap_err();
 
         assert_eq!(err_a, err_b, "两种失败必须不可区分");
     }
@@ -808,8 +830,8 @@ mod tests {
         let mut rng = SeqRandom(1);
         let (_hs, hello) = ClientHandshake::start(fake, DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
-        let err =
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
+        let err = accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng)
+            .unwrap_err();
         assert_eq!(err, CryptoError::HandshakeAuthFailed);
     }
 
@@ -820,8 +842,8 @@ mod tests {
         // 改一个字节的临时公钥 —— MAC 必须失配。
         hello[CLIENT_HELLO_PREFIX_LEN + HELLO_NONCE_LEN] ^= 0x01;
         let mut cache = HelloReplayCache::new();
-        let err =
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
+        let err = accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng)
+            .unwrap_err();
         assert_eq!(err, CryptoError::HandshakeAuthFailed);
     }
 
@@ -845,10 +867,12 @@ mod tests {
     #[test]
     fn client_rejects_tampered_server_hello() {
         let mut rng = SeqRandom(1);
-        let (client_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
+        let (client_hs, hello) =
+            ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
         let accepted =
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng)
+                .unwrap();
 
         let mut bad = accepted.response.clone();
         let last = bad.len() - 1;
@@ -862,15 +886,18 @@ mod tests {
     #[test]
     fn client_rejects_mismatched_client_nonce() {
         let mut rng = SeqRandom(1);
-        let (client_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
+        let (client_hs, hello) =
+            ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
         let mut accepted =
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng)
+                .unwrap();
 
         // 服务端回显了错误的 nonce。重算 MAC 让它「合法」，客户端仍必须拒绝。
         let nonce_offset = 1 + SESSION_ID_LEN;
         accepted.response[nonce_offset] ^= 0x01;
-        let handshake_key = derive_handshake_key(client_psk().key(), client_psk().id().as_bytes(), DEVICE);
+        let handshake_key =
+            derive_handshake_key(client_psk().key(), client_psk().id().as_bytes(), DEVICE);
         let signed_len = SERVER_HELLO_LEN - MAC_LEN;
         let mac = hmac_sha256(&handshake_key, &accepted.response[..signed_len]);
         accepted.response[signed_len..].copy_from_slice(&mac);
@@ -887,7 +914,9 @@ mod tests {
         assert!(parse_server_hello(&[PROTOCOL_VERSION; 10]).is_err());
         let mut cache = HelloReplayCache::new();
         let mut rng = SeqRandom(1);
-        assert!(accept_client_hello(&server_store(), &[], DEVICE, NOW, &mut cache, &mut rng).is_err());
+        assert!(
+            accept_client_hello(&server_store(), &[], DEVICE, NOW, &mut cache, &mut rng).is_err()
+        );
     }
 
     #[test]
@@ -897,7 +926,8 @@ mod tests {
         hello[0] = 99;
         let mut cache = HelloReplayCache::new();
         assert!(matches!(
-            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err(),
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng)
+                .unwrap_err(),
             CryptoError::UnsupportedVersion { got: 99, .. }
         ));
     }
@@ -911,8 +941,10 @@ mod tests {
         assert_ne!(hello1, hello2, "每次握手的临时公钥与 nonce 都必须不同");
 
         let mut cache = HelloReplayCache::new();
-        let a1 = accept_client_hello(&server_store(), &hello1, DEVICE, NOW, &mut cache, &mut rng).unwrap();
-        let a2 = accept_client_hello(&server_store(), &hello2, DEVICE, NOW, &mut cache, &mut rng).unwrap();
+        let a1 = accept_client_hello(&server_store(), &hello1, DEVICE, NOW, &mut cache, &mut rng)
+            .unwrap();
+        let a2 = accept_client_hello(&server_store(), &hello2, DEVICE, NOW, &mut cache, &mut rng)
+            .unwrap();
 
         let s1 = hs1.finish(&a1.response, NOW).unwrap();
         let s2 = hs2.finish(&a2.response, NOW).unwrap();
@@ -935,7 +967,8 @@ mod tests {
 
         for psk in [client_psk(), Psk::new("prod-v2", [0x44; PSK_LEN]).unwrap()] {
             let (hs, hello) = ClientHandshake::start(psk, DEVICE, NOW, &mut rng).unwrap();
-            let accepted = accept_client_hello(&store, &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
+            let accepted =
+                accept_client_hello(&store, &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
             hs.finish(&accepted.response, NOW).unwrap();
         }
     }

@@ -160,7 +160,12 @@ impl Server {
     }
 
     /// 处理 ClientHello，返回 ServerHello。`deviceId` 由握手请求携带并折进握手密钥。
-    pub fn accept(&mut self, client_hello: &[u8], device_id: &str, now_ms: f64) -> Result<Vec<u8>, JsError> {
+    pub fn accept(
+        &mut self,
+        client_hello: &[u8],
+        device_id: &str,
+        now_ms: f64,
+    ) -> Result<Vec<u8>, JsError> {
         self.inner
             .accept(client_hello, device_id.as_bytes(), now_ms.max(0.0) as u64)
             .map_err(to_js)

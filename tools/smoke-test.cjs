@@ -60,6 +60,8 @@ try {
 // 这样无论产物里有没有真密钥，功能断言都能跑。
 const PSK_ID = 'ci-smoke';
 const PSK_HEX = 'a1'.repeat(32);
+// 设备号：协议 v2 起客户端与服务端必须用同一个，握手才成立。
+const DEVICE_ID = 'ci-smoke-device';
 
 // ---------------------------------------------------------------------------
 // 1. 协议版本与构建期 PSK 状态
@@ -85,7 +87,7 @@ if (expectRealPsk) {
 // ---------------------------------------------------------------------------
 // 2. 握手
 // ---------------------------------------------------------------------------
-const client = new m.Client(PSK_ID, PSK_HEX);
+const client = new m.Client(PSK_ID, PSK_HEX, DEVICE_ID);
 const server = new m.Server();
 server.putPsk(PSK_ID, PSK_HEX);
 
@@ -96,7 +98,7 @@ check('ClientHello 非空', () => {
   assert.ok(hello && hello.length > 0);
 });
 
-const serverHello = server.accept(hello, now);
+const serverHello = server.accept(hello, DEVICE_ID, now);
 client.finish(serverHello, now);
 
 const sessionId = client.sessionId;
@@ -164,7 +166,7 @@ check('跨端点重放被拒绝（AAD 绑定生效）', () => {
 // ---------------------------------------------------------------------------
 function acceptErrorMessage(hello) {
   try {
-    server.accept(hello, now);
+    server.accept(hello, DEVICE_ID, now);
     return null;
   } catch (err) {
     return err.message;
@@ -172,10 +174,10 @@ function acceptErrorMessage(hello) {
 }
 
 check('错误 PSK 握手被拒绝', () => {
-  const badClient = new m.Client(PSK_ID, 'b2'.repeat(32));
+  const badClient = new m.Client(PSK_ID, 'b2'.repeat(32), DEVICE_ID);
   const badHello = badClient.handshake(now);
   assert.throws(
-    () => server.accept(badHello, now),
+    () => server.accept(badHello, DEVICE_ID, now),
     '错误 PSK 也能握手成功，PSK 认证形同虚设',
   );
 });
@@ -184,10 +186,10 @@ check('未知 psk_id 与错误密钥返回同一种失败', () => {
   // 两者必须不可区分，否则攻击者可以拿不同的 id 反复握手，靠错误消息把
   // 服务端配置了哪些 psk_id 枚举出来 —— 一旦确认 id，他就省掉了猜 id 这一步。
   const wrongKey = acceptErrorMessage(
-    new m.Client(PSK_ID, 'b2'.repeat(32)).handshake(now),
+    new m.Client(PSK_ID, 'b2'.repeat(32), DEVICE_ID).handshake(now),
   );
   const unknownId = acceptErrorMessage(
-    new m.Client('no-such-psk-id', 'b2'.repeat(32)).handshake(now),
+    new m.Client('no-such-psk-id', 'b2'.repeat(32), DEVICE_ID).handshake(now),
   );
   assert.ok(wrongKey, '错误密钥居然握手成功了');
   assert.ok(unknownId, '未知 psk_id 居然握手成功了');

@@ -139,12 +139,14 @@ mod tests {
         let now = 1_700_000_000_000u64;
         let mut rng = OsRandom;
 
-        let (handshake, hello) = ClientHandshake::start(psk.clone(), b"dev-01", now, &mut rng).unwrap();
+        let (handshake, hello) =
+            ClientHandshake::start(psk.clone(), b"dev-01", now, &mut rng).unwrap();
 
         let mut store = PskStore::new();
         store.insert(psk);
         let mut cache = HelloReplayCache::new();
-        let accepted = accept_client_hello(&store, &hello, b"dev-01", now, &mut cache, &mut rng).unwrap();
+        let accepted =
+            accept_client_hello(&store, &hello, b"dev-01", now, &mut cache, &mut rng).unwrap();
 
         let mut client = handshake.finish(&accepted.response, now).unwrap();
         let mut server = accepted.session;
