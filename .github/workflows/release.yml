@@ -30,14 +30,16 @@ jobs:
   # ---------------------------------------------------------------------------
   version-guard:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      protocol: ${{ steps.check.outputs.protocol }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: 校验 tag 与 Cargo.toml 版本一致
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: 校验 tag、Cargo.toml 版本与协议版本三方一致
+        id: check
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME#v}"
           VERSION=$(awk '
             /^\[workspace\.package\]/ { in_section = 1; next }
             /^\[/ { in_section = 0 }
@@ -52,8 +54,31 @@ jobs:
             echo "::error::无法从 Cargo.toml 的 [workspace.package] 解析出 version"
             exit 1
           fi
-          echo "tag：$GITHUB_REF_NAME（去掉 v 前缀为 $TAG）"
-          echo "Cargo.toml 版本：$VERSION"
+
+          # 协议版本是版本号规则的锚点：MAJOR 必须等于 PROTOCOL_VERSION，
+          # 否则「2.3.1」这种号就无法一眼看出它说的是协议 v几，版本号迟早乱。
+          PROTOCOL=$(grep -oE 'PROTOCOL_VERSION: u8 = [0-9]+' core/src/protocol.rs | grep -oE '[0-9]+$')
+          if [ -z "$PROTOCOL" ]; then
+            echo "::error::无法从 core/src/protocol.rs 解析出 PROTOCOL_VERSION"
+            exit 1
+          fi
+          MAJOR=${VERSION%%.*}
+          echo "Cargo.toml 版本：$VERSION（MAJOR=$MAJOR），协议版本：$PROTOCOL"
+          if [ "$MAJOR" != "$PROTOCOL" ]; then
+            echo "::error::版本号 MAJOR（$MAJOR）与 PROTOCOL_VERSION（$PROTOCOL）不一致。"
+            echo "::error::规则见 docs/versioning.md：协议破坏性变更时 MAJOR 必须跟着 PROTOCOL_VERSION 走。"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "protocol=$PROTOCOL" >> "$GITHUB_OUTPUT"
+
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="${{ steps.check.outputs.version }}"
+          echo "tag：$GITHUB_REF_NAME（去掉 v 前缀为 $TAG）；Cargo.toml 版本：$VERSION"
           if [ "$TAG" != "$VERSION" ]; then
             echo "::error::tag（$TAG）与 Cargo.toml 的 version（$VERSION）不一致。"
             echo "::error::先改 Cargo.toml 的 [workspace.package] version 并提交，再打 tag。"
@@ -74,7 +99,7 @@ jobs:
       CRYPTIFY_KEY: ${{ secrets.CRYPTIFY_KEY }}
 
   release:
-    needs: build
+    needs: [version-guard, build]
     runs-on: ubuntu-latest
     # 手动触发时 github.ref 不是 tag，跳过发布只留 artifact。
     if: startsWith(github.ref, 'refs/tags/')
@@ -121,13 +146,27 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          name: 加密层 v${{ needs.version-guard.outputs.version }}（协议 v${{ needs.version-guard.outputs.protocol }}）
           files: |
             dist/*.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true
-          draft: true
+          # draft: false —— 每个 tag 都直接发布成正式 Release，出现在仓库
+          # Releases 列表里（需求：每个版本都要在发行版中显示）。version-guard
+          # 已经把 tag / Cargo.toml / 协议版本三方对齐，无需再靠人工检查后手动发布。
+          draft: false
+          # 正式版排在 dev-latest 之前作为「Latest」。dev-latest 是 prerelease，
+          # 不会抢占这个标记。
+          make_latest: true
           body: |
-            四平台加密层产物。
+            **加密层 v${{ needs.version-guard.outputs.version }}** ·
+            协议版本 `PROTOCOL_VERSION = ${{ needs.version-guard.outputs.protocol }}`
+
+            版本号规则见仓库 `docs/versioning.md`：`MAJOR.MINOR.PATCH`，其中
+            **MAJOR 恒等于协议版本**。所以本版说的是协议 v${{ needs.version-guard.outputs.protocol }}；
+            凡 MAJOR 变化即线格式破坏，服务端与三端客户端必须同批升级。
+
+            四平台加密层产物：
 
             | 包 | 内容 |
             | --- | --- |

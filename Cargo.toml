@@ -9,8 +9,16 @@ members = [
 
 # 版本号刻意与客户端 / 服务端发布版本解耦：加密层有独立的协议版本（PROTOCOL_VERSION），
 # 它一旦变化就意味着线上要同时升级服务端和客户端，不能跟着 App 的版本号一起漂。
+#
+# 版本号规则（详见 docs/versioning.md）：`MAJOR.MINOR.PATCH`，铁律是
+# **MAJOR == core/src/protocol.rs 的 PROTOCOL_VERSION**。所以协议 v2 → 包 2.x.y。
+#   · MAJOR：仅当 PROTOCOL_VERSION 变（线格式破坏，端必须同步升）
+#   · MINOR：向后兼容的能力新增
+#   · PATCH：修复 / 性能 / 混淆 / 安全，线格式与 API 不变
+# tag 必须是 v<此值>；release.yml 的 version-guard 会同时校验
+# 「tag == 此 version」和「MAJOR == PROTOCOL_VERSION」，任一不符就拦下。
 [workspace.package]
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.82"
 license = "UNLICENSED"

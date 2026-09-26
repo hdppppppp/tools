@@ -453,7 +453,7 @@ X25519 的域运算全靠内联和循环展开，而 ChaCha20/Poly1305 有 SIMD 
 | 入口 | 密钥 | 需要登录 | 何时更新 |
 | --- | --- | --- | --- |
 | **开发构建** `dev-latest` | 占位（`hasRealPsk() = false`） | 否 | 每次 push 到 main |
-| **正式版本** `v*` tag | 注入真实 PSK | 是（draft） | 打 tag 后产出 |
+| **正式版本** `v*` tag | 注入真实 PSK | 否（自动发布） | 打 tag 后产出 |
 
 ```bash
 # 开发构建：免登录直链，浏览器直接打开也能下
@@ -473,7 +473,7 @@ done
 ```powershell
 pwsh tools/fetch-crypto.ps1                     # 全部四平台
 pwsh tools/fetch-crypto.ps1 -Only wasm,node-linux-x64
-pwsh tools/fetch-crypto.ps1 -Version v0.1.0     # 生产版本（需 -Token）
+pwsh tools/fetch-crypto.ps1 -Version v2.0.0     # 生产版本（需 -Token）
 ```
 
 > 没有 `pwsh`（只有 Windows 自带的 5.1）时，把 `pwsh` 换成 `&`：
@@ -535,14 +535,23 @@ pwsh tools/build.ps1 -Target all -OutDir ..\music\crypto\dist   # 直接输出�
 
 ### 发布
 
-1. 改 `Cargo.toml` 里 `[workspace.package] version`
-2. 提交
-3. 打 tag 并推送：`git tag v0.1.0 && git push origin v0.1.0`
-4. CI 跑完在 Releases 里拿到 **draft** 版本，检查无误后手动发布
+版本号规则完整写在 [`docs/versioning.md`](docs/versioning.md)，一句话铁律：
+**包版本 `MAJOR.MINOR.PATCH` 的 MAJOR 恒等于 `PROTOCOL_VERSION`**，所以协议 v2 →
+包 `2.x.y`。`CHANGELOG.md` 记每版改动。
 
-版本号与协议版本是**两件事**：`PROTOCOL_VERSION`（当前为 1）一旦变化就意味着
-线上要同时升级服务端和客户端，不能跟着语义化版本一起漂。tag 与 `Cargo.toml`
-的 version 不一致时 `version-guard` 会拦下来。
+1. 若动了握手 / 帧 / 头格式，先把 `core/src/protocol.rs` 的 `PROTOCOL_VERSION` +1
+2. 按规则改 `Cargo.toml` 的 `[workspace.package] version`（协议变了就进 MAJOR），
+   并在 `CHANGELOG.md` 顶部加一条
+3. 提交
+4. 打 tag 并推送：`git tag v2.0.0 && git push tools v2.0.0`
+5. `release.yml` 自动构建、注入真密钥、发布成**正式 Release**（不再是 draft），
+   直接出现在 Releases 列表，名字形如「加密层 v2.0.0（协议 v2）」
+
+`version-guard` 会在打 tag 时同时校验「tag == Cargo.toml 版本」和
+「MAJOR == PROTOCOL_VERSION」，任一不符直接拦下，版本号不可能悄悄漂移。
+
+`PROTOCOL_VERSION`（当前为 **2**）一旦变化就意味着线上要同时升级服务端和客户端——
+这正是把它锚进 MAJOR 的原因：看到版本号就知道它说的是哪一版协议。
 
 ---
 
