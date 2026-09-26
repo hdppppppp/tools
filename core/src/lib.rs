@@ -114,7 +114,8 @@ mod tests {
 
     #[test]
     fn protocol_version_is_exposed() {
-        assert_eq!(PROTOCOL_VERSION, 1);
+        // v2：握手密钥绑定设备号（见 kdf::derive_handshake_key）。
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 
     #[test]
