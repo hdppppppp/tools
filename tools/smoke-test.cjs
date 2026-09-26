@@ -128,7 +128,7 @@ check('请求方向：客户端加密 → 服务端解密', () => {
 });
 
 check('从帧反推出的头值格式正确', () => {
-  assert.match(client.headerForFrame(reqFrame), /^v1\.[0-9a-f]+\.[0-9]+$/);
+  assert.match(client.headerForFrame(reqFrame), /^v\d+\.[0-9a-f]+\.[0-9]+$/);
 });
 
 const respAad = m.aadContext('200', '/api/v1/ci-smoke');

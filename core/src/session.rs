@@ -198,7 +198,10 @@ impl Session {
     pub fn parse_header_value(value: &str) -> Option<([u8; SESSION_ID_LEN], u64)> {
         let mut parts = value.split('.');
         let tag = parts.next()?;
-        if tag != "v1" {
+        // 版本标签跟随 PROTOCOL_VERSION，不能硬编码 —— 否则升版后握手能成、
+        // 但头部一律被自己的解析器拒掉（v2 的头带 "v2."，硬编码 "v1" 会全拒）。
+        let expected_tag = format!("v{}", PROTOCOL_VERSION);
+        if tag != expected_tag.as_str() {
             return None;
         }
         let session_hex = parts.next()?;
@@ -211,7 +214,7 @@ impl Session {
         Some((id, seq))
     }
 
-    /// 生成 HTTP 头值：`v1.<session_id_hex>.<seq>`。
+    /// 生成 HTTP 头值：`v<版本>.<session_id_hex>.<seq>`。
     pub fn header_value(&self, seq: u64) -> String {
         format!("v{}.{}.{}", PROTOCOL_VERSION, self.id_hex(), seq)
     }
@@ -285,7 +288,7 @@ mod tests {
     fn header_value_roundtrips() {
         let (c, _s) = session_pair(600);
         let value = c.header_value(42);
-        assert_eq!(value, format!("v1.{}.42", c.id_hex()));
+        assert_eq!(value, format!("v{}.{}.42", PROTOCOL_VERSION, c.id_hex()));
         let (id, seq) = Session::parse_header_value(&value).unwrap();
         assert_eq!(id, c.id());
         assert_eq!(seq, 42);
@@ -293,19 +296,20 @@ mod tests {
 
     #[test]
     fn header_value_rejects_garbage() {
+        let v = PROTOCOL_VERSION;
         assert!(Session::parse_header_value("").is_none());
-        assert!(
-            Session::parse_header_value("v2.abc.1").is_none(),
-            "未知版本必须拒绝"
-        );
-        assert!(
-            Session::parse_header_value("v1.abc.1").is_none(),
-            "会话 ID 长度不对"
-        );
-        assert!(Session::parse_header_value("v1.00112233445566778899aabbccddeeff.abc").is_none());
-        assert!(
-            Session::parse_header_value("v1.00112233445566778899aabbccddeeff.1.extra").is_none()
-        );
+        // 旧版本号必须拒绝（当前协议是 v2）。
+        let old_version = "v1.00112233445566778899aabbccddeeff.1";
+        assert!(Session::parse_header_value(old_version).is_none());
+        // 会话 ID 长度不对。
+        let bad_sid = format!("v{v}.abc.1");
+        assert!(Session::parse_header_value(&bad_sid).is_none());
+        // 序号不是数字。
+        let bad_seq = format!("v{v}.00112233445566778899aabbccddeeff.abc");
+        assert!(Session::parse_header_value(&bad_seq).is_none());
+        // 多出一段。
+        let extra = format!("v{v}.00112233445566778899aabbccddeeff.1.extra");
+        assert!(Session::parse_header_value(&extra).is_none());
     }
 
     #[test]
