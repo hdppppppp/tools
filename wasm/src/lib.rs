@@ -62,11 +62,12 @@ pub struct Client {
 
 #[wasm_bindgen]
 impl Client {
-    /// 创建客户端。`pskHex` 必须是 64 个十六进制字符。
+    /// 创建客户端。`pskHex` 必须是 64 个十六进制字符。`deviceId` 折进握手密钥；
+    /// Web 分享页无稳定设备号，传空串即不绑定（本层不接入设备绑定，仅保持协议一致）。
     #[wasm_bindgen(constructor)]
-    pub fn new(psk_id: &str, psk_hex: &str) -> Result<Client, JsError> {
+    pub fn new(psk_id: &str, psk_hex: &str, device_id: &str) -> Result<Client, JsError> {
         Ok(Client {
-            inner: ClientEngine::new(psk_id, psk_hex).map_err(to_js)?,
+            inner: ClientEngine::new(psk_id, psk_hex, device_id).map_err(to_js)?,
         })
     }
 
@@ -158,10 +159,10 @@ impl Server {
         self.inner.remove_psk(psk_id)
     }
 
-    /// 处理 ClientHello，返回 ServerHello。
-    pub fn accept(&mut self, client_hello: &[u8], now_ms: f64) -> Result<Vec<u8>, JsError> {
+    /// 处理 ClientHello，返回 ServerHello。`deviceId` 由握手请求携带并折进握手密钥。
+    pub fn accept(&mut self, client_hello: &[u8], device_id: &str, now_ms: f64) -> Result<Vec<u8>, JsError> {
         self.inner
-            .accept(client_hello, now_ms.max(0.0) as u64)
+            .accept(client_hello, device_id.as_bytes(), now_ms.max(0.0) as u64)
             .map_err(to_js)
     }
 

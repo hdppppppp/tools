@@ -219,18 +219,21 @@ pub extern "system" fn Java_com_taotao_music_crypto_NativeCrypto_nativeAad<'loca
 // 客户端
 // ---------------------------------------------------------------------------
 
-/// 创建客户端引擎。`pskHex` 必须是 64 个十六进制字符。
+/// 创建客户端引擎。`pskHex` 必须是 64 个十六进制字符。`deviceId` 是本机稳定标识
+/// （Android ANDROID_ID），折进握手密钥；无设备号传空串即不绑定。
 #[no_mangle]
 pub extern "system" fn Java_com_taotao_music_crypto_NativeCrypto_clientNew<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
     psk_id: JString<'local>,
     psk_hex: JString<'local>,
+    device_id: JString<'local>,
 ) -> jlong {
     let psk_id = read_string(&psk_id);
     let psk_hex = read_string(&psk_hex);
+    let device_id = read_string(&device_id);
     run(&mut env, 0, |_env| {
-        Ok(insert(Entry::Client(ClientEngine::new(&psk_id, &psk_hex)?)))
+        Ok(insert(Entry::Client(ClientEngine::new(&psk_id, &psk_hex, &device_id)?)))
     })
 }
 
@@ -480,13 +483,15 @@ pub extern "system" fn Java_com_taotao_music_crypto_NativeCrypto_serverAccept<'l
     _class: JClass<'local>,
     handle: jlong,
     client_hello: JByteArray<'local>,
+    device_id: JString<'local>,
     now_ms: jlong,
 ) -> jbyteArray {
+    let device_id = read_string(&device_id);
     run(&mut env, core::ptr::null_mut(), |env| {
         let hello = read_bytes(env, client_hello);
         let now = now_ms.max(0) as u64;
         let response = with_entry(handle, |entry| match entry {
-            Entry::Server(server) => server.accept(&hello, now),
+            Entry::Server(server) => server.accept(&hello, device_id.as_bytes(), now),
             Entry::Client(_) => Err(CryptoError::SessionNotReady),
         })
         .unwrap_or(Err(CryptoError::SessionNotReady))?;

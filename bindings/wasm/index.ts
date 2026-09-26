@@ -10,7 +10,7 @@
  * ```ts
  * import init, { TaotaoCryptoClient } from "./taotao_crypto.js";
  * await init();                       // 加载并实例化 .wasm
- * const client = new TaotaoCryptoClient("prod-v1", pskHex);
+ * const client = new TaotaoCryptoClient("prod-v1", pskHex, "");  // Web 无设备号，传空串
  * ```
  *
  * ## ⚠️ Web 端不该内嵌 PSK
@@ -26,7 +26,7 @@
 /** wasm-bindgen 生成的底层模块形状（`wasm-bindgen --target web` 的产物）。 */
 export interface WasmModule {
   default: () => Promise<unknown>;
-  Client: new (psk_id: string, psk_hex: string) => WasmClient;
+  Client: new (psk_id: string, psk_hex: string, device_id: string) => WasmClient;
   Server: new () => WasmServer;
   protocol_version(): number;
   has_real_psk(): boolean;
@@ -50,7 +50,7 @@ interface WasmClient {
 interface WasmServer {
   put_psk(psk_id: string, psk_hex: string): void;
   remove_psk(psk_id: string): boolean;
-  accept(client_hello: Uint8Array, now_ms: number): Uint8Array;
+  accept(client_hello: Uint8Array, device_id: string, now_ms: number): Uint8Array;
   seal(session_id_hex: string, aad: Uint8Array, plaintext: Uint8Array, now_ms: number): Uint8Array;
   open(session_id_hex: string, aad: Uint8Array, frame: Uint8Array, now_ms: number): Uint8Array;
   has_session(session_id_hex: string, now_ms: number): boolean;
@@ -136,9 +136,9 @@ async function defaultLoader(): Promise<unknown> {
 export class TaotaoCryptoClient implements Disposable {
   private readonly inner: WasmClient;
 
-  constructor(pskId: string, pskHex: string) {
+  constructor(pskId: string, pskHex: string, deviceId: string) {
     assertReady();
-    this.inner = new module.Client(pskId, pskHex);
+    this.inner = new module.Client(pskId, pskHex, deviceId);
   }
 
   get sessionId(): string {
@@ -203,8 +203,8 @@ export class TaotaoCryptoTokens implements Disposable {
     return this.inner.remove_psk(pskId);
   }
 
-  accept(clientHello: Uint8Array, nowMs: number = Date.now()): Uint8Array {
-    return this.inner.accept(clientHello, nowMs);
+  accept(clientHello: Uint8Array, deviceId: string, nowMs: number = Date.now()): Uint8Array {
+    return this.inner.accept(clientHello, deviceId, nowMs);
   }
 
   seal(

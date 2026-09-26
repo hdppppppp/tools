@@ -41,11 +41,12 @@ pub struct Client {
 
 #[napi]
 impl Client {
-    /// 创建客户端。`pskHex` 必须是 64 个十六进制字符。
+    /// 创建客户端。`pskHex` 必须是 64 个十六进制字符。`deviceId` 是本机稳定标识
+    /// （Android ANDROID_ID / Windows MachineGuid），折进握手密钥；无设备端传空串。
     #[napi(constructor)]
-    pub fn new(psk_id: String, psk_hex: String) -> Result<Self> {
+    pub fn new(psk_id: String, psk_hex: String, device_id: String) -> Result<Self> {
         Ok(Self {
-            inner: ClientEngine::new(&psk_id, &psk_hex).map_err(to_napi)?,
+            inner: ClientEngine::new(&psk_id, &psk_hex, &device_id).map_err(to_napi)?,
         })
     }
 
@@ -158,11 +159,12 @@ impl Server {
     }
 
     /// 处理 ClientHello，返回 ServerHello。新会话自动登记。
+    /// `deviceId` 由握手请求携带，折进握手密钥；与客户端不一致则 MAC 失配、握手被拒。
     #[napi]
-    pub fn accept(&mut self, client_hello: Buffer, now_ms: i64) -> Result<Buffer> {
+    pub fn accept(&mut self, client_hello: Buffer, device_id: String, now_ms: i64) -> Result<Buffer> {
         let response = self
             .inner
-            .accept(client_hello.as_ref(), now_ms.max(0) as u64)
+            .accept(client_hello.as_ref(), device_id.as_bytes(), now_ms.max(0) as u64)
             .map_err(to_napi)?;
         Ok(Buffer::from(response))
     }

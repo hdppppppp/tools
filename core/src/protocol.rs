@@ -8,7 +8,10 @@
 /// 一旦改动帧布局或握手消息格式就必须递增，并且服务端要在同一发布窗口内
 /// 同时支持新旧两版（见 `docs/design.md` 的上线策略章节）。改这个数字不会报错，
 /// 只会让老客户端全线失联。
-pub const PROTOCOL_VERSION: u8 = 1;
+///
+/// v2：握手密钥派生绑定设备号（device_id 折进握手 info），见 [`crate::kdf::derive_handshake_key`]。
+/// 报文二进制布局与 v1 相同，但派生方式变了，两版握手密钥互不通用，故必须升版。
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// 会话 ID 长度。
 pub const SESSION_ID_LEN: usize = 16;

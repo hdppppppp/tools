@@ -48,14 +48,19 @@ const SWEEP_MIN_INTERVAL_MS: u64 = 30_000;
 #[derive(Debug)]
 pub struct ClientEngine {
     psk: Psk,
+    /// 本机设备号，握手时折进握手密钥派生（见 [`crate::kdf::derive_handshake_key`]）。
+    device_id: Vec<u8>,
     pending: Option<ClientHandshake>,
     session: Option<Session>,
 }
 
 impl ClientEngine {
-    pub fn new(psk_id: &str, psk_hex: &str) -> Result<Self> {
+    /// `device_id` 是本机稳定标识（Android `ANDROID_ID`、Windows `MachineGuid`）；
+    /// 无设备号的端（如 Web）传空串即退化为不绑定。
+    pub fn new(psk_id: &str, psk_hex: &str, device_id: &str) -> Result<Self> {
         Ok(Self {
             psk: Psk::from_hex(psk_id, psk_hex)?,
+            device_id: device_id.as_bytes().to_vec(),
             pending: None,
             session: None,
         })
@@ -71,7 +76,7 @@ impl ClientEngine {
 
     /// 同 [`ClientEngine::handshake`]，但允许注入随机源（测试用）。
     pub fn handshake_with<R: RandomSource>(&mut self, now_ms: u64, rng: &mut R) -> Result<Vec<u8>> {
-        let (pending, hello) = ClientHandshake::start(self.psk.clone(), now_ms, rng)?;
+        let (pending, hello) = ClientHandshake::start(self.psk.clone(), &self.device_id, now_ms, rng)?;
         self.pending = Some(pending);
         self.session = None;
         Ok(hello)
@@ -202,14 +207,18 @@ impl ServerEngine {
     }
 
     /// 处理 ClientHello，返回 ServerHello，并把新会话登记进会话表。
-    pub fn accept(&mut self, client_hello: &[u8], now_ms: u64) -> Result<Vec<u8>> {
+    ///
+    /// `device_id` 由外层传输携带（握手 HTTP 体里的字段），服务端用它折进握手
+    /// 密钥派生。设备号与客户端不一致时 MAC 失配、握手被拒。
+    pub fn accept(&mut self, client_hello: &[u8], device_id: &[u8], now_ms: u64) -> Result<Vec<u8>> {
         let mut rng = OsRandom;
-        self.accept_with(client_hello, now_ms, &mut rng)
+        self.accept_with(client_hello, device_id, now_ms, &mut rng)
     }
 
     pub fn accept_with<R: RandomSource>(
         &mut self,
         client_hello: &[u8],
+        device_id: &[u8],
         now_ms: u64,
         rng: &mut R,
     ) -> Result<Vec<u8>> {
@@ -231,6 +240,7 @@ impl ServerEngine {
         let AcceptedHandshake { session, response } = accept_client_hello(
             &self.psks,
             client_hello,
+            device_id,
             now_ms,
             &mut self.hello_replay,
             rng,
@@ -338,9 +348,11 @@ mod tests {
 
     const PSK_HEX: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     const NOW: u64 = 1_700_000_000_000;
+    /// 测试用设备号；客户端与服务端必须一致，握手才成立。
+    const DEVICE: &str = "test-device-01";
 
     fn pair() -> (ClientEngine, ServerEngine) {
-        let client = ClientEngine::new("prod-v1", PSK_HEX).unwrap();
+        let client = ClientEngine::new("prod-v1", PSK_HEX, DEVICE).unwrap();
         let mut server = ServerEngine::new();
         server.put_psk("prod-v1", PSK_HEX).unwrap();
         (client, server)
@@ -348,7 +360,7 @@ mod tests {
 
     fn connect(client: &mut ClientEngine, server: &mut ServerEngine, now: u64) {
         let hello = client.handshake(now).unwrap();
-        let response = server.accept(&hello, now).unwrap();
+        let response = server.accept(&hello, DEVICE.as_bytes(), now).unwrap();
         client.finish(&response, now).unwrap();
     }
 
@@ -521,7 +533,7 @@ mod tests {
         // 「到期」判断改错，过期会话会一直堆在表里直到触顶。
         let later = NOW + 31 * 60 * 1000;
         let hello = client.handshake(later).unwrap();
-        server.accept(&hello, later).unwrap();
+        server.accept(&hello, DEVICE.as_bytes(), later).unwrap();
         assert_eq!(
             server.session_count(),
             1,
@@ -568,7 +580,7 @@ mod tests {
         assert_eq!(server.psk_count(), 2);
 
         // 新客户端用 v2 也能握手（灰度期新旧并存）。
-        let mut new_client = ClientEngine::new("prod-v2", "ff".repeat(32).as_str()).unwrap();
+        let mut new_client = ClientEngine::new("prod-v2", "ff".repeat(32).as_str(), DEVICE).unwrap();
         connect(&mut new_client, &mut server, NOW + 1000);
         assert!(new_client.has_session(NOW + 1000));
 
@@ -591,12 +603,12 @@ mod tests {
     fn server_rejects_hello_with_unknown_psk() {
         let mut server = ServerEngine::new();
         server.put_psk("prod-v1", PSK_HEX).unwrap();
-        let mut client = ClientEngine::new("staging", &"aa".repeat(32)).unwrap();
+        let mut client = ClientEngine::new("staging", &"aa".repeat(32), DEVICE).unwrap();
         let hello = client.handshake(NOW).unwrap();
         // 统一返回认证失败，而不是「不认识这个 psk_id」—— 后者会把 psk_id
         // 变成可以枚举的。详见 error.rs 里那段说明。
         assert_eq!(
-            server.accept(&hello, NOW).unwrap_err(),
+            server.accept(&hello, DEVICE.as_bytes(), NOW).unwrap_err(),
             CryptoError::HandshakeAuthFailed
         );
         assert_eq!(server.session_count(), 0);
@@ -606,10 +618,10 @@ mod tests {
     fn replayed_hello_creates_no_session() {
         let (mut client, mut server) = pair();
         let hello = client.handshake(NOW).unwrap();
-        server.accept(&hello, NOW).unwrap();
+        server.accept(&hello, DEVICE.as_bytes(), NOW).unwrap();
         assert_eq!(server.session_count(), 1);
 
-        assert!(server.accept(&hello, NOW).is_err());
+        assert!(server.accept(&hello, DEVICE.as_bytes(), NOW).is_err());
         assert_eq!(server.session_count(), 1, "重放握手不能创建第二条会话");
     }
 
@@ -620,8 +632,8 @@ mod tests {
 
     #[test]
     fn wrong_psk_hex_is_rejected_at_construction() {
-        assert!(ClientEngine::new("prod", "not-hex").is_err());
-        assert!(ClientEngine::new("prod", "0011").is_err());
-        assert!(ClientEngine::new("", PSK_HEX).is_err());
+        assert!(ClientEngine::new("prod", "not-hex", DEVICE).is_err());
+        assert!(ClientEngine::new("prod", "0011", DEVICE).is_err());
+        assert!(ClientEngine::new("", PSK_HEX, DEVICE).is_err());
     }
 }

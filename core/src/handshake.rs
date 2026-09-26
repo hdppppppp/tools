@@ -414,6 +414,8 @@ pub struct ClientHandshake {
     psk: Psk,
     ephemeral: StaticSecret,
     client_nonce: [u8; HELLO_NONCE_LEN],
+    /// 本机设备号，折进握手密钥派生。收到 ServerHello 时要再用一次，故保存。
+    device_id: Vec<u8>,
 }
 
 impl core::fmt::Debug for ClientHandshake {
@@ -433,7 +435,15 @@ impl ClientHandshake {
     ///
     /// 返回 `(状态机, hello 字节)`。状态机必须保存到收到 ServerHello 为止 ——
     /// 它持有 X25519 临时私钥，丢了就没法算出会话密钥。
-    pub fn start<R: RandomSource>(psk: Psk, now_ms: u64, rng: &mut R) -> Result<(Self, Vec<u8>)> {
+    ///
+    /// `device_id` 折进握手密钥派生（不写进 ClientHello 二进制报文，由外层传输
+    /// 携带给服务端）。设备号不匹配的两端算出的握手密钥不同，MAC 必然失配。
+    pub fn start<R: RandomSource>(
+        psk: Psk,
+        device_id: &[u8],
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Result<(Self, Vec<u8>)> {
         let mut secret_bytes = [0u8; 32];
         rng.fill(&mut secret_bytes)?;
         let ephemeral = StaticSecret::from(secret_bytes);
@@ -443,7 +453,7 @@ impl ClientHandshake {
         rng.fill(&mut client_nonce)?;
 
         let eph_pub = PublicKey::from(&ephemeral);
-        let mut handshake_key = derive_handshake_key(psk.key(), psk.id().as_bytes());
+        let mut handshake_key = derive_handshake_key(psk.key(), psk.id().as_bytes(), device_id);
 
         let mut signed = Vec::with_capacity(CLIENT_HELLO_MIN_LEN);
         signed.push(PROTOCOL_VERSION);
@@ -464,6 +474,7 @@ impl ClientHandshake {
                 psk,
                 ephemeral,
                 client_nonce,
+                device_id: device_id.to_vec(),
             },
             hello,
         ))
@@ -474,7 +485,8 @@ impl ClientHandshake {
         let parsed = parse_server_hello(server_hello)?;
         check_timestamp(parsed.ts_ms, now_ms, TIMESTAMP_SKEW_MS)?;
 
-        let mut handshake_key = derive_handshake_key(self.psk.key(), self.psk.id().as_bytes());
+        let mut handshake_key =
+            derive_handshake_key(self.psk.key(), self.psk.id().as_bytes(), &self.device_id);
         let expected_mac = hmac_sha256(&handshake_key, &server_hello[..parsed.signed_len]);
         let mac_ok = constant_time_eq(&expected_mac, &server_hello[parsed.signed_len..]);
         handshake_key.zeroize();
@@ -524,6 +536,7 @@ pub struct AcceptedHandshake {
 pub fn accept_client_hello<R: RandomSource>(
     store: &PskStore,
     client_hello: &[u8],
+    device_id: &[u8],
     now_ms: u64,
     replay_cache: &mut HelloReplayCache,
     rng: &mut R,
@@ -549,8 +562,8 @@ pub fn accept_client_hello<R: RandomSource>(
     // 客户端。
     let psk = store.get(&parsed.psk_id);
     let mut handshake_key = match psk {
-        Some(psk) => derive_handshake_key(psk.key(), psk.id().as_bytes()),
-        None => derive_handshake_key(&PLACEHOLDER_PSK, b""),
+        Some(psk) => derive_handshake_key(psk.key(), psk.id().as_bytes(), device_id),
+        None => derive_handshake_key(&PLACEHOLDER_PSK, b"", device_id),
     };
     let expected_mac = hmac_sha256(&handshake_key, &client_hello[..parsed.signed_len]);
     let mac_ok = constant_time_eq(&expected_mac, &client_hello[parsed.signed_len..]);
@@ -628,6 +641,8 @@ mod tests {
     }
 
     const NOW: u64 = 1_700_000_000_000;
+    /// 测试用设备号；客户端与服务端必须一致，握手才成立。
+    const DEVICE: &[u8] = b"test-device-01";
 
     fn client_psk() -> Psk {
         Psk::new("prod-v1", [0x11; PSK_LEN]).unwrap()
@@ -642,12 +657,12 @@ mod tests {
     #[test]
     fn full_handshake_establishes_matching_sessions() {
         let mut rng = SeqRandom(1);
-        let (client_hs, hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (client_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         assert_eq!(hello[0], PROTOCOL_VERSION);
 
         let mut cache = HelloReplayCache::new();
         let accepted =
-            accept_client_hello(&server_store(), &hello, NOW + 10, &mut cache, &mut rng).unwrap();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW + 10, &mut cache, &mut rng).unwrap();
 
         let client_session = client_hs.finish(&accepted.response, NOW + 20).unwrap();
 
@@ -693,13 +708,13 @@ mod tests {
     #[test]
     fn replaying_client_hello_is_rejected() {
         let mut rng = SeqRandom(1);
-        let (_hs, hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
 
-        accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap();
+        accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
         // 同一个 hello 原样重发 —— 这是握手重放，必须挡住。
         let err =
-            accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap_err();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
         assert!(matches!(err, CryptoError::ReplayDetected { .. }));
     }
 
@@ -717,10 +732,10 @@ mod tests {
     fn unknown_psk_id_is_rejected() {
         let mut rng = SeqRandom(1);
         let other = Psk::new("staging", [0x22; PSK_LEN]).unwrap();
-        let (_hs, hello) = ClientHandshake::start(other, NOW, &mut rng).unwrap();
+        let (_hs, hello) = ClientHandshake::start(other, DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
         let err =
-            accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap_err();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
         // 必须是**统一的**认证失败，不能是 UnknownPskId —— 后者等于告诉攻击者
         // 「这个 psk_id 存在」，把 psk_id 变成可以枚举的。
         assert_eq!(err, CryptoError::HandshakeAuthFailed);
@@ -735,14 +750,14 @@ mod tests {
 
         // 情形一：id 存在，但密钥不对。
         let wrong_key = Psk::new("prod-v1", [0x33; PSK_LEN]).unwrap();
-        let (_hs, hello_a) = ClientHandshake::start(wrong_key, NOW, &mut rng).unwrap();
-        let err_a = accept_client_hello(&server_store(), &hello_a, NOW, &mut cache_a, &mut rng)
+        let (_hs, hello_a) = ClientHandshake::start(wrong_key, DEVICE, NOW, &mut rng).unwrap();
+        let err_a = accept_client_hello(&server_store(), &hello_a, DEVICE, NOW, &mut cache_a, &mut rng)
             .unwrap_err();
 
         // 情形二：id 根本不存在。
         let unknown = Psk::new("staging", [0x22; PSK_LEN]).unwrap();
-        let (_hs, hello_b) = ClientHandshake::start(unknown, NOW, &mut rng).unwrap();
-        let err_b = accept_client_hello(&server_store(), &hello_b, NOW, &mut cache_b, &mut rng)
+        let (_hs, hello_b) = ClientHandshake::start(unknown, DEVICE, NOW, &mut rng).unwrap();
+        let err_b = accept_client_hello(&server_store(), &hello_b, DEVICE, NOW, &mut cache_b, &mut rng)
             .unwrap_err();
 
         assert_eq!(err_a, err_b, "两种失败必须不可区分");
@@ -751,7 +766,7 @@ mod tests {
     #[test]
     fn peek_psk_id_reads_id_without_authenticating() {
         let mut rng = SeqRandom(1);
-        let (_hs, hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         assert_eq!(peek_psk_id(&hello), Some("prod-v1"));
 
         // 长度对不上时必须返回 None，不能越界读。
@@ -791,33 +806,34 @@ mod tests {
         // 客户端用同一个 id、不同密钥 —— 服务端查得到 id 但 MAC 对不上。
         let fake = Psk::new("prod-v1", [0x33; PSK_LEN]).unwrap();
         let mut rng = SeqRandom(1);
-        let (_hs, hello) = ClientHandshake::start(fake, NOW, &mut rng).unwrap();
+        let (_hs, hello) = ClientHandshake::start(fake, DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
         let err =
-            accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap_err();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
         assert_eq!(err, CryptoError::HandshakeAuthFailed);
     }
 
     #[test]
     fn tampered_hello_is_rejected() {
         let mut rng = SeqRandom(1);
-        let (_hs, mut hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (_hs, mut hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         // 改一个字节的临时公钥 —— MAC 必须失配。
         hello[CLIENT_HELLO_PREFIX_LEN + HELLO_NONCE_LEN] ^= 0x01;
         let mut cache = HelloReplayCache::new();
         let err =
-            accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap_err();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err();
         assert_eq!(err, CryptoError::HandshakeAuthFailed);
     }
 
     #[test]
     fn stale_timestamp_is_rejected() {
         let mut rng = SeqRandom(1);
-        let (_hs, hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
         let err = accept_client_hello(
             &server_store(),
             &hello,
+            DEVICE,
             NOW + TIMESTAMP_SKEW_MS + 1,
             &mut cache,
             &mut rng,
@@ -829,10 +845,10 @@ mod tests {
     #[test]
     fn client_rejects_tampered_server_hello() {
         let mut rng = SeqRandom(1);
-        let (client_hs, hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (client_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
         let accepted =
-            accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
 
         let mut bad = accepted.response.clone();
         let last = bad.len() - 1;
@@ -846,15 +862,15 @@ mod tests {
     #[test]
     fn client_rejects_mismatched_client_nonce() {
         let mut rng = SeqRandom(1);
-        let (client_hs, hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (client_hs, hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         let mut cache = HelloReplayCache::new();
         let mut accepted =
-            accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap();
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
 
         // 服务端回显了错误的 nonce。重算 MAC 让它「合法」，客户端仍必须拒绝。
         let nonce_offset = 1 + SESSION_ID_LEN;
         accepted.response[nonce_offset] ^= 0x01;
-        let handshake_key = derive_handshake_key(client_psk().key(), client_psk().id().as_bytes());
+        let handshake_key = derive_handshake_key(client_psk().key(), client_psk().id().as_bytes(), DEVICE);
         let signed_len = SERVER_HELLO_LEN - MAC_LEN;
         let mac = hmac_sha256(&handshake_key, &accepted.response[..signed_len]);
         accepted.response[signed_len..].copy_from_slice(&mac);
@@ -871,17 +887,17 @@ mod tests {
         assert!(parse_server_hello(&[PROTOCOL_VERSION; 10]).is_err());
         let mut cache = HelloReplayCache::new();
         let mut rng = SeqRandom(1);
-        assert!(accept_client_hello(&server_store(), &[], NOW, &mut cache, &mut rng).is_err());
+        assert!(accept_client_hello(&server_store(), &[], DEVICE, NOW, &mut cache, &mut rng).is_err());
     }
 
     #[test]
     fn version_mismatch_is_rejected() {
         let mut rng = SeqRandom(1);
-        let (_hs, mut hello) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (_hs, mut hello) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         hello[0] = 99;
         let mut cache = HelloReplayCache::new();
         assert!(matches!(
-            accept_client_hello(&server_store(), &hello, NOW, &mut cache, &mut rng).unwrap_err(),
+            accept_client_hello(&server_store(), &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap_err(),
             CryptoError::UnsupportedVersion { got: 99, .. }
         ));
     }
@@ -890,13 +906,13 @@ mod tests {
     fn each_handshake_yields_distinct_keys() {
         // 同一对 PSK 连续握手两次，会话密钥必须不同（前向保密的基础）。
         let mut rng = SeqRandom(1);
-        let (hs1, hello1) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
-        let (hs2, hello2) = ClientHandshake::start(client_psk(), NOW, &mut rng).unwrap();
+        let (hs1, hello1) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
+        let (hs2, hello2) = ClientHandshake::start(client_psk(), DEVICE, NOW, &mut rng).unwrap();
         assert_ne!(hello1, hello2, "每次握手的临时公钥与 nonce 都必须不同");
 
         let mut cache = HelloReplayCache::new();
-        let a1 = accept_client_hello(&server_store(), &hello1, NOW, &mut cache, &mut rng).unwrap();
-        let a2 = accept_client_hello(&server_store(), &hello2, NOW, &mut cache, &mut rng).unwrap();
+        let a1 = accept_client_hello(&server_store(), &hello1, DEVICE, NOW, &mut cache, &mut rng).unwrap();
+        let a2 = accept_client_hello(&server_store(), &hello2, DEVICE, NOW, &mut cache, &mut rng).unwrap();
 
         let s1 = hs1.finish(&a1.response, NOW).unwrap();
         let s2 = hs2.finish(&a2.response, NOW).unwrap();
@@ -918,8 +934,8 @@ mod tests {
         let mut cache = HelloReplayCache::new();
 
         for psk in [client_psk(), Psk::new("prod-v2", [0x44; PSK_LEN]).unwrap()] {
-            let (hs, hello) = ClientHandshake::start(psk, NOW, &mut rng).unwrap();
-            let accepted = accept_client_hello(&store, &hello, NOW, &mut cache, &mut rng).unwrap();
+            let (hs, hello) = ClientHandshake::start(psk, DEVICE, NOW, &mut rng).unwrap();
+            let accepted = accept_client_hello(&store, &hello, DEVICE, NOW, &mut cache, &mut rng).unwrap();
             hs.finish(&accepted.response, NOW).unwrap();
         }
     }

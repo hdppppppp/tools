@@ -88,12 +88,23 @@ pub fn hkdf_expand(prk: &[u8; KEY_LEN], info: &[u8]) -> [u8; KEY_LEN] {
     out
 }
 
-/// 从 PSK 派生握手专用密钥。
+/// 从 PSK 派生握手专用密钥，并绑定设备号。
 ///
 /// 握手消息里的 MAC 用这条密钥，和数据密钥完全隔离。
-pub fn derive_handshake_key(psk: &[u8; PSK_LEN], psk_id: &[u8]) -> [u8; KEY_LEN] {
+///
+/// `device_id` 折进 info：两端必须用**同一个设备号**才能算出同一把握手密钥，
+/// 否则 MAC 失配、握手失败。这样即使 PSK 被提取，攻击者在另一台设备上（拿不到
+/// 该机 device_id）也握不上手 —— 把「逆向出全局 PSK 就能冒充所有人」抬高到
+/// 「必须逐台真机提取设备号」。device_id 为空串时退化为不绑定（Web 等无设备端）。
+pub fn derive_handshake_key(psk: &[u8; PSK_LEN], psk_id: &[u8], device_id: &[u8]) -> [u8; KEY_LEN] {
     let prk = hkdf_extract(psk_id, psk);
-    hkdf_expand(&prk, &info_handshake())
+    let mut info = info_handshake();
+    if !device_id.is_empty() {
+        // 加分隔符再拼设备号，避免 info 与 device_id 边界歧义（拼接注入）。
+        info.push(b'/');
+        info.extend_from_slice(device_id);
+    }
+    hkdf_expand(&prk, &info)
 }
 
 /// 从 X25519 共享秘密派生双向会话密钥。

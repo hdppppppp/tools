@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 /** napi-rs 生成的模块接口。 */
 interface NativeModule {
-  Client: new (pskId: string, pskHex: string) => NativeClient;
+  Client: new (pskId: string, pskHex: string, deviceId: string) => NativeClient;
   Server: new () => NativeServer;
   protocolVersion(): number;
   hasRealPsk(): boolean;
@@ -38,7 +38,7 @@ interface NativeClient {
 interface NativeServer {
   putPsk(pskId: string, pskHex: string): void;
   removePsk(pskId: string): boolean;
-  accept(clientHello: Buffer, nowMs: number): Buffer;
+  accept(clientHello: Buffer, deviceId: string, nowMs: number): Buffer;
   seal(sessionIdHex: string, aad: Buffer, plaintext: Buffer, nowMs: number): Buffer;
   open(sessionIdHex: string, aad: Buffer, frame: Buffer, nowMs: number): Buffer;
   hasSession(sessionIdHex: string, nowMs: number): boolean;
@@ -114,8 +114,8 @@ export function parseCryptoHeader(value: string): { sessionId: string; seq: numb
 export class TaotaoCryptoClient {
   private readonly inner: NativeClient;
 
-  constructor(pskId: string, pskHex: string) {
-    this.inner = new (load().Client)(pskId, pskHex);
+  constructor(pskId: string, pskHex: string, deviceId: string) {
+    this.inner = new (load().Client)(pskId, pskHex, deviceId);
   }
 
   get sessionId(): string {
@@ -180,9 +180,9 @@ export class TaotaoCryptoTokens {
     return this.inner.removePsk(pskId);
   }
 
-  /** 处理 ClientHello，返回 ServerHello。 */
-  accept(clientHello: Buffer, nowMs: number = Date.now()): Buffer {
-    return this.inner.accept(clientHello, nowMs);
+  /** 处理 ClientHello，返回 ServerHello。deviceId 由握手请求携带并折进握手密钥。 */
+  accept(clientHello: Buffer, deviceId: string, nowMs: number = Date.now()): Buffer {
+    return this.inner.accept(clientHello, deviceId, nowMs);
   }
 
   seal(

@@ -1,5 +1,15 @@
 # 008 · 全局传输层加密（Rust 多目标）
 
+> **协议 v2（设备绑定）变更**：握手密钥派生绑定设备号 ——
+> `derive_handshake_key(psk, psk_id, device_id)` 把 `device_id` 折进 HKDF info。
+> 客户端（`ClientEngine::new(psk_id, psk_hex, device_id)`）与服务端
+> （`ServerEngine::accept(client_hello, device_id, now)`）必须用同一个设备号，否则握手
+> MAC 失配、会话建不起来。device_id 是本机稳定标识（Android `ANDROID_ID`、
+> Windows `MachineGuid`），由握手请求携带；Web 等无设备号的端传空串即不绑定。
+> ClientHello 二进制布局与 `aad_context(method, path)` **不变**，仅 `PROTOCOL_VERSION` 升到 2。
+> 目的：即便 PSK 被逆向提取，攻击者在没有目标真机 device_id 的情况下也握不上手。
+
+
 | 项 | 值 |
 | --- | --- |
 | 严重度 | 高 |

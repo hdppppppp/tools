@@ -31,8 +31,8 @@
 //! let now = 1_700_000_000_000u64;
 //! let mut rng = OsRandom;
 //!
-//! // 1. 客户端发起握手
-//! let (handshake, hello_bytes) = ClientHandshake::start(psk, now, &mut rng)?;
+//! // 1. 客户端发起握手（device_id 折进握手密钥，无设备号传空串 b""）
+//! let (handshake, hello_bytes) = ClientHandshake::start(psk, b"<device_id>", now, &mut rng)?;
 //! // ...把 hello_bytes 发出去，拿回 server_hello...
 //! let mut session = handshake.finish(&server_hello, now)?;
 //!
@@ -139,12 +139,12 @@ mod tests {
         let now = 1_700_000_000_000u64;
         let mut rng = OsRandom;
 
-        let (handshake, hello) = ClientHandshake::start(psk.clone(), now, &mut rng).unwrap();
+        let (handshake, hello) = ClientHandshake::start(psk.clone(), b"dev-01", now, &mut rng).unwrap();
 
         let mut store = PskStore::new();
         store.insert(psk);
         let mut cache = HelloReplayCache::new();
-        let accepted = accept_client_hello(&store, &hello, now, &mut cache, &mut rng).unwrap();
+        let accepted = accept_client_hello(&store, &hello, b"dev-01", now, &mut cache, &mut rng).unwrap();
 
         let mut client = handshake.finish(&accepted.response, now).unwrap();
         let mut server = accepted.session;
