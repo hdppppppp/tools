@@ -239,6 +239,27 @@ pub extern "system" fn Java_com_taotao_music_crypto_NativeCrypto_clientNew<'loca
     })
 }
 
+/// 用**内嵌 PSK** 创建客户端引擎。`deviceId` 是本机稳定标识（Android ANDROID_ID），
+/// 折进握手密钥；无设备号传空串即不绑定。
+///
+/// 与 [`clientNew`](Java_com_taotao_music_crypto_NativeCrypto_clientNew) 的区别：
+/// 密钥不由 Kotlin 传入，直接取构建期编进 `.so` 的那份，避免 APK 自带明文 PSK。
+#[no_mangle]
+pub extern "system" fn Java_com_taotao_music_crypto_NativeCrypto_clientNewEmbedded<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    psk_id: JString<'local>,
+    device_id: JString<'local>,
+) -> jlong {
+    let psk_id = read_string(&psk_id);
+    let device_id = read_string(&device_id);
+    run(&mut env, 0, |_env| {
+        Ok(insert(Entry::Client(ClientEngine::from_embedded(
+            &psk_id, &device_id,
+        )?)))
+    })
+}
+
 /// 发起握手，返回 ClientHello 字节。
 #[no_mangle]
 pub extern "system" fn Java_com_taotao_music_crypto_NativeCrypto_clientHandshake<'local>(

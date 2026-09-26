@@ -4,6 +4,16 @@
 **MAJOR 恒等于 `PROTOCOL_VERSION`**。每个正式版由 `vX.Y.Z` tag 触发，
 自动发布到仓库 Releases。
 
+## v2.1.0
+
+协议版本不变（仍 `PROTOCOL_VERSION = 2`），**向后兼容**：旧客户端 / 服务端无需升级。
+
+- 新增「用内嵌 PSK 构造客户端」入口，密钥不再经宿主语言传递：
+  - `ClientEngine::from_embedded(psk_id, device_id)`（core）——取构建期编进产物的 PSK。
+  - JNI 导出 `NativeCrypto.clientNewEmbedded(pskId, deviceId)`（jni）——供 Android /
+    Windows JVM 客户端使用，避免 APK 自带明文 PSK 十六进制串、抵消产物混淆加固。
+  - node / wasm 暂不加（服务端与 Web 不走此路径）。
+
 ## v2.0.0
 
 协议版本 `PROTOCOL_VERSION = 2`。**线格式破坏**，服务端与三端客户端必须同批升级。

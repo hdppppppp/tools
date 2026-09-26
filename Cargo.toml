@@ -18,7 +18,7 @@ members = [
 # tag 必须是 v<此值>；release.yml 的 version-guard 会同时校验
 # 「tag == 此 version」和「MAJOR == PROTOCOL_VERSION」，任一不符就拦下。
 [workspace.package]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "UNLICENSED"
