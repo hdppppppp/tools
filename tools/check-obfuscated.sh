@@ -24,16 +24,17 @@
 set -euo pipefail
 
 # 这些串必须**不存在**于产物中。挑的都是「泄露信息量最大」的那几条：
-# 错误文案直接说明校验逻辑（「时间戳超出允许窗口」= 这里有防重放时间窗），
-# 协议标签直接给出 HKDF 的 info 值。
+# 错误文案直接说明校验逻辑（「时间戳超出允许窗口」= 这里有防重放时间窗）。
+#
+# 注意：`taotao-crypto-v1/handshake`、`.../key/c2s`、`.../key/s2c` 这三个 HKDF
+# 标签**刻意不再混淆**（v2.3.0 起改为明文常量）——它们必须在开/不开 obfuscate
+# 的两种构建下逐字节一致，否则客户端(混淆)与服务端(不混淆)派生的握手密钥不同、
+# 握手必失败。见 core/src/kdf.rs 的说明。因此不能把它们列进这里，否则永远为红。
 NEEDLES=(
   "帧认证失败"
   "握手认证失败"
   "时间戳超出允许窗口"
   "会话序号空间耗尽"
-  "taotao-crypto-v1/handshake"
-  "taotao-crypto-v1/key/c2s"
-  "taotao-crypto-v1/key/s2c"
   "taotao-crypto-v1/psk/"
 )
 
