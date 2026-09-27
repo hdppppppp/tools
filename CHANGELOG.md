@@ -4,6 +4,16 @@
 **MAJOR 恒等于 `PROTOCOL_VERSION`**。每个正式版由 `vX.Y.Z` tag 触发，
 自动发布到仓库 Releases。
 
+## v2.2.0
+
+协议版本不变（仍 `PROTOCOL_VERSION = 2`），**向后兼容**。
+
+- 新增「服务端用内嵌 PSK 登记」入口，与客户端 `from_embedded` 对称，构建期注入
+  一次即两端通用，服务端无需再从环境变量喂十六进制：
+  - `ServerEngine::put_embedded_psk(psk_id)`（core）
+  - napi `Server.putEmbeddedPsk(pskId)`（node）
+  - jni/wasm 暂不加（服务端主要走 node）。
+
 ## v2.1.0
 
 协议版本不变（仍 `PROTOCOL_VERSION = 2`），**向后兼容**：旧客户端 / 服务端无需升级。

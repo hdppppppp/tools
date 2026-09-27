@@ -221,6 +221,18 @@ impl ServerEngine {
         Ok(())
     }
 
+    /// 用**构建期注入的内嵌 PSK** 登记一条 PSK，密钥不经宿主语言传递。
+    ///
+    /// 与 [`ClientEngine::from_embedded`] 对称：服务端与客户端用同一次构建注入的
+    /// 同一把钥（编进 `.node` / `.so`），因此服务端只需给出 `psk_id`，无需再从
+    /// 环境变量喂一遍十六进制。内嵌的是占位密钥时（开发构建）也会登记 —— 是否
+    /// 启用由调用方查 `has_real_psk()` 决定。
+    pub fn put_embedded_psk(&mut self, psk_id: &str) -> Result<()> {
+        let (psk, _) = crate::build_psk_or_placeholder(psk_id)?;
+        self.psks.insert(psk);
+        Ok(())
+    }
+
     /// 移除一条 PSK。返回是否真的移除了。
     pub fn remove_psk(&mut self, psk_id: &str) -> bool {
         self.psks.remove(psk_id)
@@ -691,5 +703,23 @@ mod tests {
             .seal_open_helper(client.session_id_hex().as_str(), &aad, &frame, NOW)
             .unwrap();
         assert!(opened.is_empty());
+    }
+
+    #[test]
+    fn embedded_psk_client_and_server_interoperate() {
+        // 两端都用内嵌 PSK（同一次构建注入的同一把钥）：客户端 from_embedded、
+        // 服务端 put_embedded_psk，无需任何十六进制传递即可握手与收发。
+        let mut client = ClientEngine::from_embedded("prod-v1", DEVICE).unwrap();
+        let mut server = ServerEngine::new();
+        server.put_embedded_psk("prod-v1").unwrap();
+        connect(&mut client, &mut server, NOW);
+        assert!(client.has_session(NOW));
+
+        let aad = aad("GET", "/api/v1/favorites");
+        let frame = client.seal(&aad, b"hi", NOW).unwrap();
+        let opened = server
+            .seal_open_helper(client.session_id_hex().as_str(), &aad, &frame, NOW)
+            .unwrap();
+        assert_eq!(opened, b"hi");
     }
 }
