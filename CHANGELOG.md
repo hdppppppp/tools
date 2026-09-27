@@ -4,6 +4,19 @@
 **MAJOR 恒等于 `PROTOCOL_VERSION`**。每个正式版由 `vX.Y.Z` tag 触发，
 自动发布到仓库 Releases。
 
+## v2.3.0
+
+协议版本不变（仍 `PROTOCOL_VERSION = 2`）。**关键修复**：KDF 的三个协议标签
+（`handshake` / `key/c2s` / `key/s2c`）此前经 `obf!` 混淆，而客户端产物（jni/wasm）
+开 `obfuscate`、服务端（node）不开——一旦两端运行期解出的标签字节不完全一致，
+握手密钥不同、MAC 失配，表现为「同 PSK、同设备号也握不上手」，且 node↔node
+测试仍绿，极难定位。改为**明文字节常量**，保证任何构建下派生一致，并加
+`kdf_info_labels_are_plaintext_constants` 回归测试钉死标签。标签是固定协议
+常量、非秘密，去混淆无安全损失。
+
+- 客户端与服务端务必**同时升级到 ≥ 2.3.0**（旧版标签若真的被混淆改写过，
+  与新版互不兼容）。
+
 ## v2.2.0
 
 协议版本不变（仍 `PROTOCOL_VERSION = 2`），**向后兼容**。

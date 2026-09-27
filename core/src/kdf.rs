@@ -21,19 +21,21 @@ pub const RANDOM_BLOCK_LEN: usize = 16;
 
 /// 握手专用密钥的 HKDF info 标签。
 ///
-/// 返回 `Vec<u8>` 而不是 `const &[u8]`：标签要经 [`crate::obf::obf!`] 混淆，
-/// 而混淆是在**运行期**才把明文解出来的，`const` 里放不下。
+/// ⚠️ **绝不能经 `obf!` 混淆**：客户端产物（jni/wasm）开启 `obfuscate` feature，
+/// 服务端（node）不开。若标签走 `obf!`，两端在「运行期解出的字节是否逐字节相同」
+/// 上就有了一个隐含假设——一旦不成立，两端派生出的握手密钥不同，MAC 必然失配，
+/// 表现为「同 PSK、同设备号也握不上手」，且 node↔node（同为不混淆）测试还是绿的，
+/// 极难定位（本项目真踩过）。这些标签是**固定协议常量、不是秘密**，用明文字节
+/// 常量保证任何构建下派生完全一致。
 ///
-/// 代价是每次调用多一次分配。这些函数只在握手路径上被调用（每个会话一次，
-/// 而会话 TTL 是 30 分钟），不在逐帧热路径上 —— 帧加密走的是派生好的
-/// [`SessionKeys`]，不会经过这里。
+/// 返回 `Vec<u8>` 只是为了与调用点签名保持一致（历史上曾用 `obf!` 返回 `String`）。
 fn info_handshake() -> Vec<u8> {
-    obf!("taotao-crypto-v1/handshake").into_bytes()
+    b"taotao-crypto-v1/handshake".to_vec()
 }
 
 /// 客户端→服务端数据密钥的 HKDF info 标签。理由见 [`info_handshake`]。
 fn info_key_c2s() -> Vec<u8> {
-    obf!("taotao-crypto-v1/key/c2s").into_bytes()
+    b"taotao-crypto-v1/key/c2s".to_vec()
 }
 
 /// 服务端→客户端数据密钥的 HKDF info 标签。理由见 [`info_handshake`]。
@@ -41,7 +43,7 @@ fn info_key_c2s() -> Vec<u8> {
 /// 双向必须用**不同**的 info 派生：如果两个方向共用一个密钥，服务端加密的
 /// 响应就能被原样当作客户端请求发回来（反射攻击），而 MAC 是合法的。
 fn info_key_s2c() -> Vec<u8> {
-    obf!("taotao-crypto-v1/key/s2c").into_bytes()
+    b"taotao-crypto-v1/key/s2c".to_vec()
 }
 
 /// 随机数来源抽象。
@@ -201,6 +203,17 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kdf_info_labels_are_plaintext_constants() {
+        // 关键回归：这三个标签**必须**是与 obfuscate feature 无关的固定明文字节。
+        // 客户端产物开混淆、服务端不开；若标签经 obf! 且两端解出的字节不一致，
+        // 握手密钥就会不同、MAC 失配（同 PSK 同设备也握不上手），而 node↔node
+        // 同为不混淆时测试仍绿，极难定位。这条把标签字节钉死。
+        assert_eq!(info_handshake(), b"taotao-crypto-v1/handshake");
+        assert_eq!(info_key_c2s(), b"taotao-crypto-v1/key/c2s");
+        assert_eq!(info_key_s2c(), b"taotao-crypto-v1/key/s2c");
+    }
 
     #[test]
     fn hkdf_expand_is_deterministic_and_info_separated() {
